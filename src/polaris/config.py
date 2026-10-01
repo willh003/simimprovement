@@ -40,6 +40,8 @@ class PolicyArgs:
     host: str = "0.0.0.0"
     port: int = 8000
     open_loop_horizon: int | None = 8
+    steering_ckpt: str | None = None  # Steered client: latent_rl checkpoint dir (actor.pt, config.json)
+    deterministic: bool = True  # Steered client: use the actor mean instead of sampling
 
 
 @dataclass

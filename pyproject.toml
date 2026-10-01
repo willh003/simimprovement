@@ -39,6 +39,9 @@ dev = [
     "ruff>=0.14.9",
 ]
 
+[tool.uv.extra-build-dependencies]
+flatdict = ["setuptools<81"]
+
 [tool.uv.sources]
 isaacsim = { index = "nvidia" }
 diff-surfel-rasterization = { path = "src/diff-surfel-rasterization", editable=true}

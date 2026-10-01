@@ -35,6 +35,32 @@ class DroidJointPosClient(InferenceClient):
         combined = np.concatenate([base_img, wrist_img], axis=1)
         return combined
 
+    def build_request(self, obs: dict, instruction: str) -> tuple[dict, np.ndarray]:
+        """Build the openpi request dict and the model-view visualization."""
+        curr_obs = self._extract_observation(obs)
+        exterior_image = image_tools.resize_with_pad(curr_obs["right_image"], 224, 224)
+        wrist_image = image_tools.resize_with_pad(curr_obs["wrist_image"], 224, 224)
+        request_data = {
+            "observation/exterior_image_1_left": exterior_image,
+            "observation/wrist_image_left": wrist_image,
+            "observation/joint_position": curr_obs["joint_position"],
+            "observation/gripper_position": curr_obs["gripper_position"],
+            "prompt": instruction,
+        }
+        return request_data, np.concatenate([exterior_image, wrist_image], axis=1)
+
+    def query_chunk(self, request: dict, noise: np.ndarray | None = None) -> np.ndarray:
+        """Query the server for an action chunk; optional initial flow-matching noise."""
+        if noise is not None:
+            request = {**request, "noise": noise}
+        return self.client.infer(request)["actions"]
+
+    @staticmethod
+    def postprocess_action(action: np.ndarray) -> np.ndarray:
+        """Binarize the gripper dimension (kept outside the learned part)."""
+        grip = 1.0 if action[-1].item() > 0.5 else 0.0
+        return np.concatenate([action[:-1], np.full((1,), grip)])
+
     def reset(self):
         self.actions_from_chunk_completed = 0
         self.pred_action_chunk = None
@@ -51,23 +77,9 @@ class DroidJointPosClient(InferenceClient):
             self.actions_from_chunk_completed == 0
             or self.actions_from_chunk_completed >= self.open_loop_horizon
         ):
-            curr_obs = self._extract_observation(obs)
-
             self.actions_from_chunk_completed = 0
-            exterior_image = image_tools.resize_with_pad(
-                curr_obs["right_image"], 224, 224
-            )
-            wrist_image = image_tools.resize_with_pad(curr_obs["wrist_image"], 224, 224)
-            request_data = {
-                "observation/exterior_image_1_left": exterior_image,
-                "observation/wrist_image_left": wrist_image,
-                "observation/joint_position": curr_obs["joint_position"],
-                "observation/gripper_position": curr_obs["gripper_position"],
-                "prompt": instruction,
-            }
-            server_response = self.client.infer(request_data)
-            self.pred_action_chunk = server_response["actions"]
-            both = np.concatenate([exterior_image, wrist_image], axis=1)
+            request_data, both = self.build_request(obs, instruction)
+            self.pred_action_chunk = self.query_chunk(request_data)
 
         if return_viz and both is None:
             curr_obs = self._extract_observation(obs)
@@ -85,11 +97,7 @@ class DroidJointPosClient(InferenceClient):
         action = self.pred_action_chunk[self.actions_from_chunk_completed]
         self.actions_from_chunk_completed += 1
 
-        # binarize gripper action
-        if action[-1].item() > 0.5:
-            action = np.concatenate([action[:-1], np.ones((1,))])
-        else:
-            action = np.concatenate([action[:-1], np.zeros((1,))])
+        action = self.postprocess_action(action)
 
         return action, both
 

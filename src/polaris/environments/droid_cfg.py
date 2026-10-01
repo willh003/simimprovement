@@ -45,7 +45,7 @@ class FixedCamera(Camera):
 
         # get the poses from the view
         env_ids = env_ids.to(torch.int32)
-        poses, quat = self._view.get_world_poses(env_ids, usd=False)
+        poses, quat = self._view.get_world_poses(env_ids)
         self._data.pos_w[env_ids] = poses
         self._data.quat_w_world[env_ids] = (
             math.convert_camera_frame_orientation_convention(
