@@ -5,7 +5,6 @@ No Isaac imports, so these are testable with fake envs.
 
 from dataclasses import dataclass, field
 
-SIM_EVALS_ENV_PREFIX = "DROID-SimEvals"
 SIM_EVALS_INSTRUCTIONS = {
     "CubeBowl": "put the cube in the bowl",
     "CanMug": "put the can in the mug",
@@ -19,7 +18,7 @@ SIM_EVALS_SUCCESS_TERMS = {  # reward term that defines success
 
 
 def is_sim_evals(env_id: str) -> bool:
-    return env_id.startswith(SIM_EVALS_ENV_PREFIX)
+    return env_id in SIM_EVALS_INSTRUCTIONS
 
 
 @dataclass

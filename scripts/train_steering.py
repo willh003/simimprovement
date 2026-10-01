@@ -2,6 +2,8 @@
 
 import argparse
 import time
+import uuid
+from datetime import datetime
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -17,7 +19,6 @@ from polaris.config import PolicyArgs
 @dataclass
 class TrainArgs:
     environment: str  # e.g. DROID-FoodBussing (splat + rubric) or {CubeBowl,CanMug,BananaBin} (plain render, no splat)
-    run_folder: str
     policy: PolicyArgs
     headless: bool = True
     initial_conditions_file: str | None = None
@@ -38,7 +39,7 @@ class TrainArgs:
     seed: int = 0
     wandb_project: str = "polaris-steering"
     wandb_entity: str | None = None  # default: your wandb default entity
-    wandb_name: str | None = None  # default: random wandb run name
+    runs_root: str = "runs/steering"  # run folder: <runs_root>/<environment>-DDMM-HHMM-<uuid6>; same string is the wandb run name
     wandb_mode: str = "online"  # online | offline | disabled
     log_every: int = 10  # chunks between train/* logs (update metrics are averaged over the interval)
     eval_every: int = 500  # chunks; eval runs at the next episode boundary
@@ -109,9 +110,11 @@ def main(args: TrainArgs):
     eval_steered = SteeredPolicy(algo.actor, cfg, encoder, steered.base, deterministic=True)
     eval_env = ChunkEnv(env, client, eval_steered, instruction, args.gamma, success_bonus, task)
 
-    out_dir = Path(args.run_folder)
+    run_name = f"{args.environment}-{datetime.now():%d%m-%H%M}-{uuid.uuid4().hex[:6]}"
+    out_dir = Path(args.runs_root) / run_name
     out_dir.mkdir(parents=True, exist_ok=True)
-    logger = WandbLogger(args.wandb_project, out_dir, asdict(args), args.wandb_entity, args.wandb_name, args.wandb_mode)
+    print(f"run folder / wandb run name: {out_dir}")
+    logger = WandbLogger(args.wandb_project, out_dir, asdict(args), args.wandb_entity, run_name, args.wandb_mode)
 
     def run_eval(step: int):
         for split, conds in eval_splits.items():

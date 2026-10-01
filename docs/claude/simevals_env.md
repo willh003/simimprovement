@@ -13,7 +13,7 @@
 `ChunkTransition` now carries `success` and `reached`; `EpisodeStats` uses those (not `info["rubric"]`), and `final_progress` is only logged when the info has a rubric.
 
 ## Client
-`SimEvalsJointPosClient` (`policy/droid_jointpos_client.py`, registered `DroidJointPosSimEvals`) reads `obs["policy"]` cameras (`external_cam`, `wrist_cam`, full-res → resized to 224 by `build_request`) instead of `obs["splat"]`. `train_steering.py` picks it automatically for `DROID-SimEvals*` ids.
+`SimEvalsJointPosClient` (`policy/droid_jointpos_client.py`, registered `DroidJointPosSimEvals`) reads `obs["policy"]` cameras (`external_cam`, `wrist_cam`, full-res → resized to 224 by `build_request`) instead of `obs["splat"]`. `train_steering.py` picks it automatically for the sim-evals env ids (`is_sim_evals` in `rl/tasks.py`: ids in `SIM_EVALS_INSTRUCTIONS`).
 
 ## Behaviour differences from the splat envs
 - **Single fixed layout**: env resets to the default scene (`reset_scene_to_default`); no initial conditions, no held-out split. Eval = `eval_train_conditions` episodes of the same layout, logged as `eval/fixed/*`. Variation only from the policy/base-noise stochasticity.
@@ -23,21 +23,21 @@
 - Hovering reward (`can_near_mug`) accrues each step while above the mug, so it can be farmed (max ≈0.25/step); watch `return/can_near_mug` vs `success/all`.
 - `record=True` is not more expensive here (no splat), so eval videos cost nothing extra.
 
-## Caveats / untested
-Written without being able to run Isaac here. Tests (`tests/test_rl_logging.py::test_sim_evals_task_*`) use fakes. Not yet verified in the container: that the isaaclab 2.3.0 build runs the ported cfg (sim-evals pins 2.2.0), and the `get_active_iterable_terms` scaling assumption (the rescale makes this robust).
+## Status
+All three tasks (CanMug, CubeBowl, BananaBin) were confirmed working in the container by the user (env builds, rollouts run with the openpi server). Unit tests (`tests/test_rl_logging.py::test_sim_evals_task_*`) use fakes. The `get_active_iterable_terms` values are on a different scale from the env reward, so both `SimEvalsTask` and `run_pi.py` rescale terms to sum to the reward.
 
-Run (inside the Isaac container, openpi server on the same node):
-`python scripts/train_steering.py --environment CanMug --run-folder runs/steering_canmug --policy.open-loop-horizon 8 --policy.port 8000 ...`
+Train (inside the Isaac container, openpi server on the same node; output goes to `runs/steering/<env>-DDMM-HHMM-<uuid>`, see steering_training.md):
+`python scripts/train_steering.py --environment CanMug --policy.open-loop-horizon 8 --policy.port 8000 ...`
 
-## Checking the port: `scripts/eval_simevals.py`
-Port of sim-evals' `run_eval.py` onto the polaris env/client (same video overlay with per-term rewards; saves `all_cams.png`, `episode_<n>_{success,fail}.mp4`, `episode_<n>_rewards.txt` under `runs/simevals_eval/<date>/<time>`). `--dummy-policy` needs no server (holds pose, gripper open) and only checks env build/reset/step/render/video.
+## Checking an env/policy: `scripts/run_pi.py`
+Port of sim-evals' `run_eval.py` onto the polaris env/client. Saves `all_cams.png`, `episode_<n>_{success,fail}.mp4`, `episode_<n>_rewards.txt` under `runs/simevals_eval/<date>/<time>`. Video side panel: step, SUCCESS/FAIL, `return: current / total / max` (max = peak running return), and each reward term's value on the current step (no cumulative). `--dummy-policy` needs no server (holds pose, gripper open) and only checks env build/reset/step/render/video.
 ```
 cd /gscratch/weirdlab/will/polaris && export PYTHONPATH=$PWD/src:$PYTHONPATH
-/isaac-sim/python.sh scripts/eval_simevals.py --episodes 1 --dummy-policy      # env only
-/isaac-sim/python.sh scripts/eval_simevals.py --episodes 2 --policy.port 8000   # with openpi server
+/isaac-sim/python.sh scripts/run_pi.py --environment CanMug --episodes 1 --dummy-policy      # env only
+/isaac-sim/python.sh scripts/run_pi.py --environment CubeBowl --episodes 2 --policy.port 8000  # with openpi server
 ```
 
 ## CubeBowl (scene 1) and BananaBin (scene 3)
 sim-evals only defines rewards for scene 2, so for 1 and 3 `set_scene` builds the same two terms (`obj_in_container` = success, `obj_near_container` = 0.25 shaping) from `SCENE_TASKS` in `simeval_droid.py`: name keywords for the object/container rigid bodies and `object_in_container` thresholds (`xy_threshold`, `success_z_max`). Instruction and success-term tables are in `rl/tasks.py`.
-Rigid bodies (from `inspect_simevals_scene.py`): scene 1 `rubiks_cube`, `_24_bowl`; scene 2 `_10_potted_meat_can`, `_25_mug`; scene 3 `_11_banana`, `small_KLT_visual_collision` (the bin). Names resolve by keyword (error if 0 or >1 match).
-**Thresholds are untuned guesses** from the initial poses (table top z≈0.08; bowl origin z 0.078, bin origin z 0.125): CubeBowl xy<0.05, z∈[0,0.08]; BananaBin xy<0.08, z∈[-0.08,0.1] (negative z_min because banana rests on the bin floor, below its origin). Also requires the object to be nearly still. Verify with `eval_simevals.py --environment <Task>` and the reward printouts, or by hand-placing the object, then adjust `SCENE_TASKS`.
+Rigid bodies in the scene USDs: scene 1 `rubiks_cube`, `_24_bowl`; scene 2 `_10_potted_meat_can`, `_25_mug`; scene 3 `_11_banana`, `small_KLT_visual_collision` (the bin). Names resolve by keyword (error if 0 or >1 match).
+**Thresholds are hand-set** (not tuned) from the initial poses (table top z≈0.08; bowl origin z 0.078, bin origin z 0.125): CubeBowl xy<0.05, z∈[0,0.08]; BananaBin xy<0.08, z∈[-0.08,0.1] (negative z_min because banana rests on the bin floor, below its origin). Also requires the object to be nearly still. Verify with `run_pi.py --environment <Task>` and the reward printouts, or by hand-placing the object, then adjust `SCENE_TASKS`.

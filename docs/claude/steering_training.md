@@ -64,10 +64,13 @@ Notes:
 - The x-axis for all wandb metrics is chunks.
 
 ## Key `TrainArgs`
-`environment`, `run_folder`, `policy` (PolicyArgs: host/port of openpi server), `noise_shape`, `encoder` (`droid_proprio|droid_vision`), `steer_horizon`, `z_bound`, `gamma` (0.99), `success_bonus`, `total_chunks` (5000), `warmup_chunks` (200), `batch_size` (256), `updates_per_chunk`, `heldout`, `save_every`, `eval_every`, `eval_videos`, wandb options.
+`environment`, `runs_root`, `policy` (PolicyArgs: host/port of openpi server), `noise_shape`, `encoder` (`droid_proprio|droid_vision`), `steer_horizon`, `z_bound`, `gamma` (0.99), `success_bonus`, `total_chunks` (5000), `warmup_chunks` (200), `batch_size` (256), `updates_per_chunk`, `heldout`, `save_every`, `eval_every`, `eval_videos`, wandb options.
 
 ## Using a trained checkpoint
-Set the `Steered` client with `policy.steering_ckpt=<run_folder>/ckpt_X` (and `deterministic`) for evaluation; `SteeredPolicy.from_checkpoint` rebuilds the encoder from `config.json`, and checks `noise_shape` matches the base policy. Pi server helper scripts: `scripts/start_pi_server.sh`, `scripts/test_pi_server.sh`.
+Set the `Steered` client with `policy.steering_ckpt=runs/steering/<run>/ckpt_X` (and `deterministic`) for evaluation; `SteeredPolicy.from_checkpoint` rebuilds the encoder from `config.json`, and checks `noise_shape` matches the base policy. Pi server helper scripts: `scripts/start_pi_server.sh`, `scripts/test_pi_server.sh`.
 
 ## Other env backends
 Training also supports the sim-evals scene-2 env (no splat, fixed layout): see [simevals_env.md](simevals_env.md).
+
+## Run folder / naming
+Each run writes to `<runs_root>/<environment>-DDMM-HHMM-<uuid6>` (default `runs/steering/...`, e.g. `runs/steering/CanMug-0110-1423-a3f9c1`). That exact string is also the wandb run name. Contents: `ckpt_<n>/`, `ckpt_final/`, `videos/`, `wandb/`. The path is printed at start.

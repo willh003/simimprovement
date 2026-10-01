@@ -6,7 +6,7 @@
 | `src/polaris/rl/chunk_env.py` | `ChunkTransition.reward_terms` (one term per rubric criterion + `success_bonus`; `reward == sum`), `.steps`, `.frames` (only with `step(record=True)`, which splat-renders every env step) | no |
 | `src/polaris/rl/stats.py` | `EpisodeStats` (per-episode sums per term + success flags), `MeanAccumulator` (interval means of update metrics), `RollingMean` (moving success rates) | no |
 | `src/polaris/rl/evaluation.py` | `evaluate(chunk_env, conditions, n_videos)` → mean metrics + recorded frame lists | no |
-| `src/polaris/rl/wandb_logger.py` | `WandbLogger.log / log_video / finish`; mp4s also saved to `<run_folder>/videos/` | **only file** |
+| `src/polaris/rl/wandb_logger.py` | `WandbLogger.log / log_video / finish`; mp4s also saved to `<run_dir>/videos/` | **only file** |
 | `src/polaris/latent_rl/algos/dsrl_sac.py` | `update()` returns extra diagnostics | no |
 
 ## Reward terms & success metrics
