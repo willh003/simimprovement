@@ -3,6 +3,7 @@ data/
 runs/
 PolaRiS-Hub/
 PolaRiS-datasets/
+assets/simevals/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

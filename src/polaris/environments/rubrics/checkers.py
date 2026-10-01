@@ -17,6 +17,7 @@ def reach(obj_name, threshold=0.05):
         dist = torch.norm(obj_pos - ee_pos)
         return dist < threshold
 
+    checker.__name__ = f"reach_{obj_name}"
     return checker
 
 
@@ -29,6 +30,7 @@ def lift(obj_name, threshold=0.05, default_height=None):
 
         return (object_pos[2] - default_height).item() > threshold
 
+    checker.__name__ = f"lift_{obj_name}"
     return checker
 
 
@@ -88,6 +90,7 @@ def is_within_xy(object1, object2, percent_threshold=0.5, open_finger_threshold=
 
         return overlap_ratio >= percent_threshold
 
+    checker.__name__ = f"{object1}_in_{object2}"
     return checker
 
 

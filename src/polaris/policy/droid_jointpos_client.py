@@ -117,3 +117,18 @@ class DroidJointPosClient(InferenceClient):
             "joint_position": joint_position,
             "gripper_position": gripper_position,
         }
+
+
+@InferenceClient.register(client_name="DroidJointPosSimEvals")
+class SimEvalsJointPosClient(DroidJointPosClient):
+    """Same as DroidJointPosClient, but reads the sim-evals env's plain-render cameras (obs['policy'])."""
+
+    def _extract_observation(self, obs_dict):
+        policy = obs_dict["policy"]
+        return {
+            "right_image": policy["external_cam"][0].detach().cpu().numpy(),
+            "wrist_image": policy["wrist_cam"][0].detach().cpu().numpy(),
+            # sim-evals proprio obs have no env dim (unlike the splat env): (7,) and (1,)
+            "joint_position": policy["arm_joint_pos"].detach().cpu().numpy(),
+            "gripper_position": policy["gripper_pos"].detach().cpu().numpy(),
+        }

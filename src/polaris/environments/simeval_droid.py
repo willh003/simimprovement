@@ -23,9 +23,18 @@ from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.envs import ManagerBasedRLEnv, ManagerBasedRLEnvCfg
 from isaaclab.sensors import CameraCfg, ContactSensorCfg
 
-from .nvidia_droid import NVIDIA_DROID
+from .simeval_robot import ASSET_PATH, NVIDIA_DROID
 
-DATA_PATH = Path(__file__).parent / "../../../assets/"
+DATA_PATH = ASSET_PATH
+
+# Scenes other than 2: keywords (lowercase substrings of the USD rigid-body names) locating the object and the
+# container, plus object_in_container thresholds. Thresholds are guesses; verify with the inspector script.
+SCENE_TASKS = {
+    "1": dict(object=("rubiks_cube",), container=("bowl",), thresholds=dict(xy_threshold=0.05), success_z_max=0.08),  # put the cube in the bowl
+    # the "bin" is the rigid body small_KLT_visual_collision; its origin sits above the floor, so z_min < 0
+    "3": dict(object=("banana",), container=("klt",), thresholds=dict(xy_threshold=0.08, z_min=-0.08), success_z_max=0.1),  # put banana in the bin
+}
+
 
 @configclass
 class SceneCfg(InteractiveSceneCfg):
@@ -369,16 +378,27 @@ class EnvCfg(ManagerBasedRLEnvCfg):
         self.rerender_on_reset = True
 
     
+    def _rigid_name(self, *keywords: str) -> str:
+        """The single scene rigid body whose name contains one of `keywords` (error if none/ambiguous)."""
+        names = [k for k, v in vars(self.scene).items() if isinstance(v, RigidObjectCfg)]
+        hits = [n for n in names if any(kw in n.lower() for kw in keywords)]
+        if len(hits) != 1:
+            raise ValueError(
+                f"expected exactly one rigid body matching {keywords}, got {hits} (all: {names}); "
+                "run scripts/inspect_simevals_scene.py and add the right name to SCENE_TASKS"
+            )
+        return hits[0]
+
     def set_scene(self, scene_name: str, table_contact_penalty: bool = False):
         self.scene.dynamic_scene(scene_name)
         self.rewards = RewardsCfg()
+        step_dt = self.sim.dt * self.decimation  # the reward manager scales terms by step_dt; cancel it so rewards are exactly 0/1
         if str(scene_name) == "2":
             # "put the can in the mug": sparse reward of 1 while the can rests in the mug,
             # plus a smaller shaping reward while it is above the mug but too high to count
             self.rewards.can_in_mug = RewTerm(
                 func=object_in_container,
-                # the reward manager scales terms by step_dt; cancel it so the reward is exactly 0/1
-                weight=1.0 / (self.sim.dt * self.decimation),
+                weight=1.0 / step_dt,
                 params={ 
                     "object_cfg": SceneEntityCfg("_10_potted_meat_can"),
                     "container_cfg": SceneEntityCfg("_25_mug"),
@@ -386,11 +406,23 @@ class EnvCfg(ManagerBasedRLEnvCfg):
             )
             self.rewards.can_near_mug = RewTerm(
                 func=object_near_container,
-                weight=0.25 / (self.sim.dt * self.decimation),
+                weight=0.25 / step_dt,
                 params={
                     "object_cfg": SceneEntityCfg("_10_potted_meat_can"),
                     "container_cfg": SceneEntityCfg("_25_mug"),
                 },
+            )
+        elif str(scene_name) in SCENE_TASKS:
+            # same structure as scene 2; objects are found by name keyword, thresholds are UNTUNED guesses
+            task = SCENE_TASKS[str(scene_name)]
+            obj, cont = self._rigid_name(*task["object"]), self._rigid_name(*task["container"])
+            params = {"object_cfg": SceneEntityCfg(obj), "container_cfg": SceneEntityCfg(cont), **task["thresholds"]}
+            self.rewards.obj_in_container = RewTerm(
+                func=object_in_container, weight=1.0 / step_dt, params={**params, "z_max": task["success_z_max"]}
+            )
+            self.rewards.obj_near_container = RewTerm(
+                func=object_near_container, weight=0.25 / step_dt,
+                params={**params, "success_z_max": task["success_z_max"], "z_max": task["success_z_max"] + 0.09},
             )
         if table_contact_penalty:
             # optional penalty (-1/step) while any gripper link touches the table
@@ -406,3 +438,30 @@ class EnvCfg(ManagerBasedRLEnvCfg):
             )
 
 
+
+
+@configclass
+class CanMugEnvCfg(EnvCfg):
+    """sim-evals scene 2 ("put the can in the mug") with its reward terms."""
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.set_scene("2")
+
+
+@configclass
+class CubeBowlEnvCfg(EnvCfg):
+    """sim-evals scene 1 ("put the cube in the bowl")."""
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.set_scene("1")
+
+
+@configclass
+class BananaBinEnvCfg(EnvCfg):
+    """sim-evals scene 3 ("put banana in the bin")."""
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.set_scene("3")

@@ -33,10 +33,46 @@ from sim_evals.inference.droid_jointpos import Client as DroidJointPosClient
 from sim_evals.inference.dummy import Client as DummyClient
 
 
+SUCCESS_TERM = "can_in_mug"  # reward term that defines task success
+
+
+def overlay_frame(frame, step, term_vals, term_cums, running_return, ep_return, success, success_step):
+    """Return `frame` with a text panel appended to its right (the images are not covered or resized).
+
+    Shows step, SUCCESS/FAIL, and each reward term's current value and running total.
+    """
+    frame = np.ascontiguousarray(frame)
+    h, w = frame.shape[:2]
+    scale = max(h / 480, 0.4)
+    th = 1 if scale < 0.8 else 2
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    lh = int(38 * scale)
+    panel = np.zeros((h, int(560 * scale), 3), dtype=np.uint8)
+
+    reached = success and success_step is not None and step >= success_step
+    status, status_color = ("SUCCESS", (0, 220, 0)) if reached else (
+        ("FAIL", (255, 60, 60)) if not success else ("...", (200, 200, 200))
+    )
+    rows = [
+        (f"step {step}", (255, 255, 255)),
+        (status + ("" if not success or reached else f" (at {success_step})"), status_color),
+        (f"return: {running_return:.2f} / {ep_return:.2f}", (255, 255, 255)),
+        ("reward terms (now / total)", (160, 160, 160)),
+    ]
+    for name, v in term_vals.items():
+        color = (0, 255, 0) if v > 0 else (255, 120, 120) if v < 0 else (255, 255, 255)
+        rows.append((f"{name}: {v:+.2f} / {term_cums[name]:.2f}", color))
+    for i, (text, color) in enumerate(rows):
+        cv2.putText(panel, text, (8, lh * (i + 1)), font, scale * 0.9, color, th, cv2.LINE_AA)
+    if reached:
+        cv2.rectangle(panel, (0, 0), (panel.shape[1] - 1, h - 1), (0, 200, 0), max(int(4 * scale), 2))
+    return np.concatenate([frame, panel], axis=1)
+
+
 def main(
         episodes:int = 10,
         headless: bool = True,
-        scene: int = 1,
+        scene: int = 2,
         remote_host: str = "localhost",
         remote_port: int = 8000,
         dummy_policy: bool = False,
@@ -102,6 +138,9 @@ def main(
     max_steps = env.env.max_episode_length
     with torch.no_grad():
         for ep in range(episodes):
+            ep_return = 0.0
+            rewards = []
+            term_hist = []  # per step: {term name: weighted value}
             for _ in tqdm(range(max_steps), desc=f"Episode {ep+1}/{episodes}"):
                 ret = client.infer(obs, instruction)
                 if not headless:
@@ -109,13 +148,41 @@ def main(
                     cv2.waitKey(1)
                 video.append(ret["viz"])
                 action = torch.tensor(ret["action"])[None]
-                obs, _, term, trunc, _ = env.step(action)
+                obs, rew, term, trunc, _ = env.step(action)
+                r = float(rew[0])
+                rewards.append(r)
+                term_hist.append(
+                    dict(
+                        (name, vals[0])
+                        for name, vals in env.unwrapped.reward_manager.get_active_iterable_terms(0)
+                    )
+                )
+                ep_return += r
+                if r != 0:
+                    tqdm.write(f"  step {len(rewards) - 1}: reward {r:.3f}")
                 if term or trunc:
                     break
 
+            # An episode is successful if the success term fired at any step (shaping terms don't count)
+            succ = [t.get(SUCCESS_TERM, r) for t, r in zip(term_hist, rewards)]
+            success = any(v > 0 for v in succ)
+            success_step = next((i for i, v in enumerate(succ) if v > 0), None)
+            print(f"Episode {ep+1} return: {ep_return} -> {'SUCCESS' if success else 'FAIL'}")
+            np.savetxt(video_dir / f"episode_{ep}_rewards.txt", np.array(rewards), fmt="%.6f")
             client.reset()
+            running = np.cumsum(rewards)
+            cums = {}
+            video_out = []
+            for i, f in enumerate(video[: len(rewards)]):
+                for k, v in term_hist[i].items():
+                    cums[k] = cums.get(k, 0.0) + v
+                video_out.append(
+                    overlay_frame(f, i, term_hist[i], dict(cums), running[i], ep_return, success, success_step)
+                )
+            video = video_out
+            suffix = "success" if success else "fail"
             mediapy.write_video(
-                video_dir / f"episode_{ep}.mp4",
+                video_dir / f"episode_{ep}_{suffix}.mp4",
                 video,
                 fps=15,
             )

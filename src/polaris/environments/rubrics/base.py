@@ -33,6 +33,13 @@ class Rubric:
         self.config = kwargs
         self.criteria = criteria
         self.criteria_reached = [False] * len(criteria)
+        self.criteria_names = self._unique_names(criteria)
+
+    @staticmethod
+    def _unique_names(criteria) -> list[str]:
+        """Stable, unique, logging-friendly name per criterion: '<idx>_<checker name>'."""
+        fns = [c[0] if isinstance(c, tuple) else c for c in criteria]
+        return [f"{i}_{getattr(fn, '__name__', 'criterion').strip('_')}" for i, fn in enumerate(fns)]
 
     def evaluate(self, env: ManagerBasedRLEnv) -> RubricResult:
         """
@@ -68,6 +75,8 @@ class Rubric:
         progress = num_reached_ever / num_criteria if num_criteria > 0 else 0.0
         metrics["criteria_ever_reached"] = num_reached_ever
         metrics["criteria_total"] = num_criteria
+        for name, reached in zip(self.criteria_names, self.criteria_reached):
+            metrics[f"reached/{name}"] = float(reached)  # max-ever, i.e. monotone within an episode
 
         success = num_reached_ever == num_criteria
         return RubricResult(success=success, progress=progress, metrics=metrics)

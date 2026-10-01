@@ -14,6 +14,7 @@ srun --jobid=<JOBID> --overlap <command>        # run anything on that node
 Apptainer shares the host network, so the container reaches the server at `localhost:8000`.
 
 ## 2. Start the server (from `third_party/openpi`)
+This script is in scripts/start_pi_server.pi
 ```
 cd /gscratch/weirdlab/will/polaris/third_party/openpi
 nohup srun --jobid=<JOBID> --overlap bash -c '

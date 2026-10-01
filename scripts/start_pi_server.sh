@@ -2,16 +2,20 @@
 # Start (or stop) an openpi policy server on the node of a running slurm job.
 # See OPENPI_SERVER.md for background and pitfalls.
 #
-# Usage: start_pi_server.sh JOBID [--stop]
+# Usage: start_pi_server.sh [JOBID] [--stop]
+#   With no JOBID, the server runs on the current node.
 #   env overrides: POLICY_CONFIG, POLICY_DIR, PORT, TIMEOUT (seconds to wait for ready)
 set -euo pipefail
 
-JOBID="${1:-}"
-MODE="${2:-start}"
-if [[ -z "$JOBID" || "$JOBID" == -* ]]; then
-  echo "usage: $0 JOBID [--stop]" >&2
-  exit 2
-fi
+JOBID=""
+MODE="start"
+for arg in "$@"; do
+  case "$arg" in
+    --stop) MODE="--stop" ;;
+    -*) echo "usage: $0 [JOBID] [--stop]" >&2; exit 2 ;;
+    *) JOBID="$arg" ;;
+  esac
+done
 
 OPENPI_DIR=/gscratch/weirdlab/will/polaris/third_party/openpi
 CACHE_DIR=/gscratch/weirdlab/will/openpi_cache
@@ -21,16 +25,27 @@ POLICY_DIR="${POLICY_DIR:-gs://openpi-assets/checkpoints/pi05_droid_jointpos}"
 PORT="${PORT:-8000}"
 TIMEOUT="${TIMEOUT:-900}"
 
-on_node() { srun --jobid="$JOBID" --overlap "$@"; }
-
-# 1. The job must exist and be running.
-state=$(squeue -j "$JOBID" -h -o "%T" 2>/dev/null || true)
-node=$(squeue -j "$JOBID" -h -o "%N" 2>/dev/null || true)
-if [[ "$state" != "RUNNING" ]]; then
-  echo "Job $JOBID is not running (state: ${state:-not found})." >&2
-  exit 1
+# Run a command on the target node: via srun if a job was given, else locally.
+if [[ -n "$JOBID" ]]; then
+  RUN=(srun --jobid="$JOBID" --overlap)
+else
+  RUN=()
 fi
-echo "Job $JOBID running on $node"
+on_node() { "${RUN[@]}" "$@"; }
+
+# 1. If a job was given, it must exist and be running.
+if [[ -n "$JOBID" ]]; then
+  state=$(squeue -j "$JOBID" -h -o "%T" 2>/dev/null || true)
+  node=$(squeue -j "$JOBID" -h -o "%N" 2>/dev/null || true)
+  if [[ "$state" != "RUNNING" ]]; then
+    echo "Job $JOBID is not running (state: ${state:-not found})." >&2
+    exit 1
+  fi
+  echo "Job $JOBID running on $node"
+else
+  node=$(hostname)
+  echo "No JOBID given; using current node $node"
+fi
 
 find_pids() {
   on_node bash -c "pgrep -u \$USER -f '[s]cripts/serve_policy.py' || true"
@@ -48,14 +63,14 @@ fi
 # 3. Don't start a second server.
 existing=$(find_pids)
 if [[ -n "$existing" ]]; then
-  echo "A server is already running on $node (pids: $existing). Use '$0 $JOBID --stop' first." >&2
+  echo "A server is already running on $node (pids: $existing). Use '$0${JOBID:+ $JOBID} --stop' first." >&2
   exit 1
 fi
 
 # 4. Launch in the background, detached from this shell.
 mkdir -p "$CACHE_DIR"
 : > "$LOG"
-setsid nohup srun --jobid="$JOBID" --overlap bash -c "
+setsid nohup "${RUN[@]}" bash -c "
   cd $OPENPI_DIR &&
   TQDM_DISABLE=1 \
   SSL_CERT_FILE=/etc/pki/tls/certs/ca-bundle.crt \
@@ -96,4 +111,4 @@ if [[ "$resp" != *"101"* ]]; then
   echo "Server logged ready but handshake failed." >&2
   exit 1
 fi
-echo "Server ready on $node:$PORT (stop with: $0 $JOBID --stop)"
+echo "Server ready on $node:$PORT (stop with: $0${JOBID:+ $JOBID} --stop)"

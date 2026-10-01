@@ -60,13 +60,19 @@ class DSRLSAC:
         actor_loss.backward()
         self.actor_opt.step()
 
+        metrics = {}
         if self.cfg.target_entropy is not None:
             alpha_loss = -(self.log_alpha * (logp.detach() + self.cfg.target_entropy)).mean()
             self.alpha_opt.zero_grad()
             alpha_loss.backward()
             self.alpha_opt.step()
+            metrics["alpha_loss"] = alpha_loss.item()
 
         with torch.no_grad():
             for p, tp in zip(self.q.parameters(), self.q_targ.parameters()):
                 tp.lerp_(p, self.cfg.tau)
-        return dict(q_loss=q_loss.item(), actor_loss=actor_loss.item(), alpha=self.alpha.item(), q_mean=q1.mean().item(), logp=logp.mean().item())
+        return dict(
+            q_loss=q_loss.item(), actor_loss=actor_loss.item(), alpha=self.alpha.item(), q_mean=q1.mean().item(), logp=logp.mean().item(),
+            q_std=q1.std().item(), q_target_mean=target.mean().item(), td_abs=(q1.detach() - target).abs().mean().item(),
+            z_abs_mean=z.abs().mean().item(), reward_mean=b["reward"].mean().item(), **metrics,
+        )

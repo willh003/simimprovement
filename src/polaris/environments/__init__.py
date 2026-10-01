@@ -9,11 +9,21 @@ from isaaclab.envs import ManagerBasedRLEnv
 from polaris.environments.rubrics import Rubric
 from polaris.utils import DATA_PATH
 import polaris.environments.rubrics.checkers as checkers
+from polaris.environments.simeval_droid import CubeBowlEnvCfg, CanMugEnvCfg, BananaBinEnvCfg
 
 
 # =============================================================================
 # Environment Registration
 # =============================================================================
+
+# sim-evals scenes (plain Isaac render, no splat); see docs/claude/simevals_env.md
+for _task, _cfg in {"CubeBowl": CubeBowlEnvCfg, "CanMug": CanMugEnvCfg, "BananaBin": BananaBinEnvCfg}.items():
+    gym.register(
+        id=f"{_task}",
+        entry_point=ManagerBasedRLEnv,
+        kwargs={"env_cfg_entry_point": _cfg},
+        disable_env_checker=True,
+    )
 
 gym.register(
     id='DROID-BlockStackKitchen',
