@@ -1,0 +1,1 @@
+/isaac-sim/kit/python/bin/python3 -c "import socket;s=socket.create_connection(('localhost',8000),5);s.send(b'GET / HTTP/1.1\r\nHost: localhost:8000\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n');print(s.recv(200).split(b'\r\n')[0].decode())"
