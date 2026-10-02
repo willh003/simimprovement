@@ -7,6 +7,8 @@ import mediapy
 import numpy as np
 import wandb
 
+from polaris.rl.local_logger import LocalMetricsLogger
+
 
 def _ensure_ffmpeg():
     """mediapy needs an ffmpeg binary; fall back to the one bundled with imageio-ffmpeg."""
@@ -23,8 +25,10 @@ class WandbLogger:
         self.video_dir.mkdir(parents=True, exist_ok=True)
         _ensure_ffmpeg()
         self.run = wandb.init(project=project, entity=entity, name=name, mode=mode, config=config, dir=str(run_dir))
+        self.local = LocalMetricsLogger(run_dir)
 
     def log(self, metrics: dict, step: int, prefix: str = ""):
+        self.local.log(metrics, step, prefix)
         self.run.log({f"{prefix}{k}": v for k, v in metrics.items()}, step=step)
 
     def log_video(self, key: str, frames: list[np.ndarray], step: int, fps: int = 15):

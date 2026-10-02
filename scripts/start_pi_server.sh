@@ -2,20 +2,30 @@
 # Start (or stop) an openpi policy server on the node of a running slurm job.
 # See OPENPI_SERVER.md for background and pitfalls.
 #
-# Usage: start_pi_server.sh [JOBID] [--stop]
+# Usage: start_pi_server.sh [JOBID] [--mem FRACTION] [--stop]
 #   With no JOBID, the server runs on the current node.
+#   --mem FRACTION: cap the server at this fraction of GPU memory (e.g. 0.5) so
+#   the GPU can be shared. Default: 1.0 (whole GPU).
 #   env overrides: POLICY_CONFIG, POLICY_DIR, PORT, TIMEOUT (seconds to wait for ready)
 set -euo pipefail
 
 JOBID=""
 MODE="start"
-for arg in "$@"; do
-  case "$arg" in
+MEM_FRACTION="1.0"
+usage() { echo "usage: $0 [JOBID] [--mem FRACTION] [--stop]" >&2; exit 2; }
+while [[ $# -gt 0 ]]; do
+  case "$1" in
     --stop) MODE="--stop" ;;
-    -*) echo "usage: $0 [JOBID] [--stop]" >&2; exit 2 ;;
-    *) JOBID="$arg" ;;
+    --mem) [[ $# -ge 2 ]] || usage; MEM_FRACTION="$2"; shift ;;
+    --mem=*) MEM_FRACTION="${1#--mem=}" ;;
+    -*) usage ;;
+    *) JOBID="$1" ;;
   esac
+  shift
 done
+if ! [[ "$MEM_FRACTION" =~ ^(0?\.[0-9]+|1(\.0+)?)$ ]] || [[ "$MEM_FRACTION" =~ ^0?\.0+$ ]]; then
+  echo "--mem must be a fraction in (0, 1], got '$MEM_FRACTION'" >&2; exit 2
+fi
 
 OPENPI_DIR=/gscratch/weirdlab/will/polaris/third_party/openpi
 CACHE_DIR=/gscratch/weirdlab/will/openpi_cache
@@ -48,7 +58,7 @@ else
 fi
 
 find_pids() {
-  on_node bash -c "pgrep -u \$USER -f '[s]cripts/serve_policy.py' || true"
+  on_node bash -c "pgrep -u \$(id -u) -f '[s]cripts/serve_policy.py' || true"
 }
 
 # 2. Stop mode.
@@ -75,17 +85,28 @@ setsid nohup "${RUN[@]}" bash -c "
   TQDM_DISABLE=1 \
   SSL_CERT_FILE=/etc/pki/tls/certs/ca-bundle.crt \
   OPENPI_DATA_HOME=$CACHE_DIR \
-  XLA_PYTHON_CLIENT_MEM_FRACTION=0.5 \
+  XLA_PYTHON_CLIENT_MEM_FRACTION=$MEM_FRACTION \
   exec uv run --no-sync scripts/serve_policy.py --port $PORT policy:checkpoint \
     --policy.config=$POLICY_CONFIG \
     --policy.dir=$POLICY_DIR" \
   > "$LOG" 2>&1 < /dev/null &
 SRUN_PID=$!
-echo "Launched ($POLICY_CONFIG), log: $LOG"
+echo "Launched ($POLICY_CONFIG, mem fraction $MEM_FRACTION), log: $LOG"
 
-# 5. Wait for readiness.
+# 5. Wait for readiness by polling the websocket handshake from the node
+# (stdlib python only; same check as test_pi_server.sh). We don't grep the log
+# since it is shared between servers and can miss the "listening" line.
+handshake() {
+  timeout 30 "${RUN[@]}" python3 -c "
+import socket
+s=socket.create_connection(('localhost',$PORT),5)
+s.settimeout(5)
+s.send(b'GET / HTTP/1.1\\r\\nHost: localhost:$PORT\\r\\nUpgrade: websocket\\r\\nConnection: Upgrade\\r\\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\\r\\nSec-WebSocket-Version: 13\\r\\n\\r\\n')
+print(s.recv(200).split(b'\\r\\n')[0].decode())
+" 2>/dev/null || true
+}
 start=$SECONDS
-while ! grep -q "server listening on" "$LOG"; do
+while true; do
   if ! kill -0 "$SRUN_PID" 2>/dev/null; then
     echo "Server exited before becoming ready. Last log lines:" >&2
     tail -n 30 "$LOG" >&2
@@ -96,19 +117,11 @@ while ! grep -q "server listening on" "$LOG"; do
     tail -n 30 "$LOG" >&2
     exit 1
   fi
+  resp=$(handshake)
+  [[ "$resp" == *"101"* ]] && break
+  last=$(tail -n 1 "$LOG" 2>/dev/null | cut -c1-120 || true)
+  echo "[$((SECONDS - start))s] waiting for server... ${last}"
   sleep 5
 done
-
-# 6. Verify the websocket handshake from the node (stdlib python only).
-resp=$(on_node python3 -c "
-import socket
-s=socket.create_connection(('localhost',$PORT),5)
-s.send(b'GET / HTTP/1.1\r\nHost: localhost:$PORT\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n')
-print(s.recv(200).split(b'\r\n')[0].decode())
-" 2>&1 || true)
 echo "Handshake: $resp"
-if [[ "$resp" != *"101"* ]]; then
-  echo "Server logged ready but handshake failed." >&2
-  exit 1
-fi
 echo "Server ready on $node:$PORT (stop with: $0${JOBID:+ $JOBID} --stop)"

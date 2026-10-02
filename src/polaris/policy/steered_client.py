@@ -8,11 +8,15 @@ from polaris.policy.droid_jointpos_client import DroidJointPosClient
 class ServerChunkPolicy:
     """Adapts DroidJointPosClient to the latent_rl ChunkPolicy protocol."""
 
-    def __init__(self, client: DroidJointPosClient, noise_shape: tuple[int, int]):
-        self.client, self.noise_shape = client, noise_shape
+    def __init__(self, client: DroidJointPosClient, noise_shape: tuple[int, int], batch_size: int | None = None):
+        self.client, self.noise_shape, self.batch_size = client, noise_shape, batch_size
 
     def query(self, obs: dict, noise: np.ndarray | None = None) -> np.ndarray:
         return self.client.query_chunk(obs, noise)
+
+    def query_batch(self, obs_list: list[dict], noise: np.ndarray | None = None) -> np.ndarray:
+        """Also satisfies `BatchChunkPolicy`: one `infer_batch` round trip (in `batch_size` sub-batches)."""
+        return self.client.query_chunks(obs_list, noise, self.batch_size)
 
 
 @InferenceClient.register(client_name="Steered")

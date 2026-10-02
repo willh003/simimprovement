@@ -5,6 +5,8 @@ No Isaac imports, so these are testable with fake envs.
 
 from dataclasses import dataclass, field
 
+import numpy as np
+
 SIM_EVALS_INSTRUCTIONS = {
     "CubeBowl": "put the cube in the bowl",
     "CanMug": "put the can in the mug",
@@ -87,3 +89,78 @@ class SimEvalsTask:
         for name, v in terms.items():
             self.reached[name] = max(self.reached.get(name, 0.0), float(v > 0))
         return StepResult(obs, terms, terms.get(self.success_term, 0.0) > 0, dict(self.reached), bool(term[0]), bool(trunc[0]), info)
+
+
+@dataclass
+class VecStepResult:
+    """One env step of N parallel envs; all arrays are (N,)."""
+
+    obs: dict
+    terms: dict[str, np.ndarray]
+    success: np.ndarray  # bool
+    reached: dict[str, np.ndarray]  # per-term max-ever 0/1 flags of the episode each env was in during this step
+    terminated: np.ndarray  # bool; includes success when the env has a success termination
+    truncated: np.ndarray  # bool (time-out)
+
+
+class VecSimEvalsTask:
+    """Vectorized SimEvalsTask for a ManagerBasedRLEnv with N envs (auto-reset inside env.step).
+
+    Reward terms per env come straight from the reward manager's (N, n_terms) buffer, which holds `func * weight`;
+    times `step_dt` they sum exactly to the env reward. Success = `success_term` > 0 on this step. For the episode to
+    end on success the env needs a success termination (see `environments.simeval_parallel.make_parallel_env`).
+    """
+
+    default_success_bonus = 0.0
+
+    def __init__(self, success_term: str = "can_in_mug"):
+        self.success_term = success_term
+        self.reached: dict[str, np.ndarray] = {}
+        self.first_reset = True
+
+    def reset(self, env) -> dict:
+        obs, _ = env.reset()
+        if self.first_reset:
+            obs, _ = env.reset()  # second render cycle loads materials correctly
+            self.first_reset = False
+        self.reached = {}
+        return obs
+
+    def step(self, env, action) -> VecStepResult:
+        obs, _, term, trunc, _ = env.step(action)
+        u = env.unwrapped
+        rm = u.reward_manager
+        vals = rm._step_reward.cpu().numpy() * u.step_dt
+        terms = {name: vals[:, i] for i, name in enumerate(rm.active_terms)}
+        for name, v in terms.items():
+            self.reached[name] = np.maximum(self.reached.get(name, 0.0), (v > 0).astype(np.float64))
+        reached = {k: v.copy() for k, v in self.reached.items()}
+        term, trunc = _np_bool(term), _np_bool(trunc)
+        for v in self.reached.values():  # envs that just ended were auto-reset: new episode, fresh flags
+            v[term | trunc] = 0.0
+        return VecStepResult(obs, terms, terms[self.success_term] > 0, reached, term, trunc)
+
+    @staticmethod
+    def hold_action(obs) -> np.ndarray:
+        """(N, 8) joint-position action holding the current arm pose, gripper open."""
+        joint = obs["policy"]["arm_joint_pos"].detach().cpu().numpy()
+        return np.concatenate([joint, np.zeros((len(joint), 1), joint.dtype)], axis=1)
+
+    @staticmethod
+    def refresh_obs(env) -> dict:
+        """Re-render and recompute obs, so envs reset on this step don't show the pre-reset camera frame.
+
+        (Isaac renders before resetting; Isaac's own `num_rerenders_on_reset` would pay this on every reset.)
+        """
+        u = env.unwrapped
+        u.sim.render()
+        for sensor in u.scene.sensors.values():
+            sensor.update(0.0, force_recompute=True)
+        u.obs_buf = u.observation_manager.compute()
+        return u.obs_buf
+
+
+def _np_bool(x) -> np.ndarray:
+    if hasattr(x, "cpu"):
+        x = x.cpu().numpy()
+    return np.asarray(x, dtype=bool).reshape(-1)

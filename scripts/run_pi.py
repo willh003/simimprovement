@@ -65,7 +65,7 @@ class DummyClient:
 
     def infer(self, obs, instruction, return_viz=False):
         policy = obs["policy"]
-        action = np.concatenate([policy["arm_joint_pos"].detach().cpu().numpy(), np.zeros(1)])
+        action = np.concatenate([policy["arm_joint_pos"][0].detach().cpu().numpy(), np.zeros(1)])
         viz = np.concatenate(
             [cv2.resize(policy[n][0].detach().cpu().numpy(), (224, 224)) for n in ("external_cam", "wrist_cam")], axis=1
         )

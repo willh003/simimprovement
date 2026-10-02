@@ -18,6 +18,22 @@ def make_encoder(name: str, **kwargs):
     return ENCODERS[name](**kwargs)
 
 
+def encode_batch(encoder, requests: list[dict]) -> np.ndarray:
+    """(N, feat_dim) features; uses the encoder's own `batch` method when it has one."""
+    if hasattr(encoder, "batch"):
+        return encoder.batch(requests)
+    return np.stack([encoder(r) for r in requests]).astype(np.float32)
+
+
+def _proprio(obs: dict) -> np.ndarray:
+    return np.concatenate(
+        [
+            np.asarray(obs["observation/joint_position"], np.float32).reshape(-1),
+            np.asarray(obs["observation/gripper_position"], np.float32).reshape(-1),
+        ]
+    )
+
+
 @register_encoder("droid_proprio")
 class DroidProprioEncoder:
     """Joint position (7) + gripper position (1) from an openpi-DROID request dict."""
@@ -28,12 +44,7 @@ class DroidProprioEncoder:
         pass
 
     def __call__(self, obs: dict) -> np.ndarray:
-        return np.concatenate(
-            [
-                np.asarray(obs["observation/joint_position"], np.float32).reshape(-1),
-                np.asarray(obs["observation/gripper_position"], np.float32).reshape(-1),
-            ]
-        )
+        return _proprio(obs)
 
 
 @register_encoder("droid_vision")
@@ -58,19 +69,21 @@ class DroidVisionEncoder:
         self.std = torch.tensor([0.229, 0.224, 0.225], device=self.device, dtype=self.dtype).view(1, 3, 1, 1)
 
     def __call__(self, obs: dict) -> np.ndarray:
+        return self.batch([obs])[0]
+
+    def batch(self, requests: list[dict], minibatch: int = 64) -> np.ndarray:
         import torch
 
-        imgs = np.stack([obs["observation/exterior_image_1_left"], obs["observation/wrist_image_left"]])
-        x = torch.from_numpy(imgs).to(self.device).permute(0, 3, 1, 2).to(self.dtype) / 255.0
-        x = (x - self.mean) / self.std
-        with torch.no_grad():
-            cls = self.model(pixel_values=x).last_hidden_state[:, 0].float()
-        if self.normalize:
-            cls = torch.nn.functional.layer_norm(cls, cls.shape[-1:])
-        proprio = np.concatenate(
-            [
-                np.asarray(obs["observation/joint_position"], np.float32).reshape(-1),
-                np.asarray(obs["observation/gripper_position"], np.float32).reshape(-1),
-            ]
-        )
-        return np.concatenate([cls.reshape(-1).cpu().numpy(), proprio]).astype(np.float32)
+        feats = []
+        for s in range(0, len(requests), minibatch):
+            reqs = requests[s : s + minibatch]
+            imgs = np.stack([img for r in reqs for img in (r["observation/exterior_image_1_left"], r["observation/wrist_image_left"])])
+            x = torch.from_numpy(imgs).to(self.device).permute(0, 3, 1, 2).to(self.dtype) / 255.0
+            x = (x - self.mean) / self.std
+            with torch.no_grad():
+                cls = self.model(pixel_values=x).last_hidden_state[:, 0].float()
+            if self.normalize:
+                cls = torch.nn.functional.layer_norm(cls, cls.shape[-1:])
+            cls = cls.reshape(len(reqs), -1).cpu().numpy()  # [exterior, wrist] per request
+            feats.append(np.concatenate([cls, np.stack([_proprio(r) for r in reqs])], axis=1))
+        return np.concatenate(feats).astype(np.float32)

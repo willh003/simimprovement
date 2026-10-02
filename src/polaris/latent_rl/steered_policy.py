@@ -9,6 +9,18 @@ from polaris.latent_rl.interfaces import ChunkPolicy, ObsEncoder
 from polaris.latent_rl.networks import SteeringActor
 
 
+def build_noise(z: np.ndarray, noise_shape: tuple[int, int], steer_horizon: int) -> np.ndarray:
+    """Full model noise: z in the first `steer_horizon` rows, N(0, I) elsewhere.
+
+    z: (steer_dim,) -> (action_horizon, action_dim), or batched (N, steer_dim) -> (N, action_horizon, action_dim).
+    """
+    ah, ad = noise_shape
+    batch = z.shape[:-1]
+    noise = np.random.randn(*batch, ah, ad).astype(np.float32)
+    noise[..., :steer_horizon, :] = z.reshape(*batch, steer_horizon, ad)
+    return noise
+
+
 @dataclass
 class SteerOutput:
     chunk: np.ndarray
@@ -32,10 +44,7 @@ class SteeredPolicy:
         return cls(actor, cfg, encoder, base, deterministic, device)
 
     def build_noise(self, z: np.ndarray) -> np.ndarray:
-        ah, ad = self.cfg.noise_shape
-        noise = np.random.randn(ah, ad).astype(np.float32)
-        noise[: self.cfg.steer_horizon] = z.reshape(self.cfg.steer_horizon, ad)
-        return noise
+        return build_noise(z, self.cfg.noise_shape, self.cfg.steer_horizon)
 
     @torch.no_grad()
     def step(self, obs: dict, feat: np.ndarray | None = None) -> SteerOutput:

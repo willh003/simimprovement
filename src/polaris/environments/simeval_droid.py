@@ -199,7 +199,7 @@ def arm_joint_pos(
     joint_indices = [
         i for i, name in enumerate(robot.data.joint_names) if name in joint_names
     ]
-    joint_pos = robot.data.joint_pos[0, joint_indices]
+    joint_pos = robot.data.joint_pos[:, joint_indices]
     return joint_pos
 
 
@@ -211,7 +211,7 @@ def gripper_pos(
     joint_indices = [
         i for i, name in enumerate(robot.data.joint_names) if name in joint_names
     ]
-    joint_pos = robot.data.joint_pos[0, joint_indices]
+    joint_pos = robot.data.joint_pos[:, joint_indices]
 
     # rescale
     joint_pos = joint_pos / (np.pi / 4)

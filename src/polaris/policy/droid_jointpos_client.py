@@ -55,6 +55,30 @@ class DroidJointPosClient(InferenceClient):
             request = {**request, "noise": noise}
         return self.client.infer(request)["actions"]
 
+    def query_chunks(self, requests: list[dict], noise: np.ndarray | None = None, batch_size: int | None = None) -> np.ndarray:
+        """Batched `query_chunk` via the server's `infer_batch`: N requests (+ optional noise (N, H, D)) -> (N, H, A).
+
+        Sent in sub-batches of `batch_size` (default: all at once); the last one is padded so the server always sees the
+        same batch size (JAX recompiles for every new size).
+        """
+        if noise is not None:
+            requests = [{**r, "noise": n} for r, n in zip(requests, noise)]
+        bs = batch_size or len(requests)
+        chunks = []
+        for s in range(0, len(requests), bs):
+            sub = requests[s : s + bs]
+            pad = bs - len(sub)
+            out = self.client.infer_batch(sub + [sub[-1]] * pad)
+            chunks += [r["actions"] for r in out[: len(sub)]]
+        return np.stack(chunks)
+
+    @staticmethod
+    def postprocess_actions(actions: np.ndarray) -> np.ndarray:
+        """Batched `postprocess_action`: (N, A) with the gripper (last dim) binarized."""
+        actions = np.array(actions, dtype=np.float32)
+        actions[:, -1] = (actions[:, -1] > 0.5).astype(np.float32)
+        return actions
+
     @staticmethod
     def postprocess_action(action: np.ndarray) -> np.ndarray:
         """Binarize the gripper dimension (kept outside the learned part)."""
@@ -123,12 +147,33 @@ class DroidJointPosClient(InferenceClient):
 class SimEvalsJointPosClient(DroidJointPosClient):
     """Same as DroidJointPosClient, but reads the sim-evals env's plain-render cameras (obs['policy'])."""
 
-    def _extract_observation(self, obs_dict):
+    def _extract_observation(self, obs_dict, env_ids=None):
+        """Model inputs of env 0; with `env_ids`, of those envs (leading dim N)."""
         policy = obs_dict["policy"]
+        idx = 0 if env_ids is None else env_ids
+        get = lambda name: policy[name][idx].detach().cpu().numpy()
         return {
-            "right_image": policy["external_cam"][0].detach().cpu().numpy(),
-            "wrist_image": policy["wrist_cam"][0].detach().cpu().numpy(),
-            # sim-evals proprio obs have no env dim (unlike the splat env): (7,) and (1,)
-            "joint_position": policy["arm_joint_pos"].detach().cpu().numpy(),
-            "gripper_position": policy["gripper_pos"].detach().cpu().numpy(),
+            "right_image": get("external_cam"),
+            "wrist_image": get("wrist_cam"),
+            "joint_position": get("arm_joint_pos"),
+            "gripper_position": get("gripper_pos"),
         }
+
+    def build_requests(self, obs: dict, instruction: str, env_ids=None) -> tuple[list[dict], np.ndarray]:
+        """Batched `build_request` for envs `env_ids` (default: all): list of requests and (N, 224, 448, 3) model views."""
+        if env_ids is None:
+            env_ids = slice(None)
+        o = self._extract_observation(obs, env_ids)
+        ext = image_tools.resize_with_pad(o["right_image"], 224, 224)
+        wrist = image_tools.resize_with_pad(o["wrist_image"], 224, 224)
+        requests = [
+            {
+                "observation/exterior_image_1_left": ext[i],
+                "observation/wrist_image_left": wrist[i],
+                "observation/joint_position": o["joint_position"][i],
+                "observation/gripper_position": o["gripper_position"][i],
+                "prompt": instruction,
+            }
+            for i in range(len(ext))
+        ]
+        return requests, np.concatenate([ext, wrist], axis=2)
