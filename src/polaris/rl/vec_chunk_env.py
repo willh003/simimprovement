@@ -6,7 +6,7 @@ import torch
 from polaris.latent_rl.checkpoint import SteeringConfig
 from polaris.latent_rl.encoders import encode_batch
 from polaris.latent_rl.interfaces import BatchChunkPolicy, ObsEncoder
-from polaris.latent_rl.steered_policy import build_noise
+from polaris.latent_rl.steered_policy import apply_residual, build_noise
 from polaris.rl.chunk_env import ChunkTransition
 
 
@@ -53,12 +53,16 @@ class VecChunkEnv:
         self.instruction, self.gamma, self.success_bonus = instruction, gamma, success_bonus
         self.horizon = client.open_loop_horizon
         self.device = getattr(env.unwrapped, "device", "cpu")
-        self.obs = self.requests = self.views = self.feat = None
+        self.obs = self.requests = self.views = self.feat = self.packed = None
         self.num_envs = 0
 
     def _observe(self):
         self.requests, self.views = self.client.build_requests(self.obs, self.instruction)
-        self.feat = encode_batch(self.encoder, self.requests)
+        if hasattr(self.encoder, "pack"):  # trainable image encoder: keep the packed (images, proprio) the feat came from
+            self.packed = self.encoder.pack(self.requests)
+            self.feat = self.encoder.encode_packed(*self.packed)
+        else:
+            self.feat = encode_batch(self.encoder, self.requests)
         self.num_envs = len(self.requests)
         return self.feat
 
@@ -68,11 +72,14 @@ class VecChunkEnv:
         return self._observe()
 
     def step(self, z: np.ndarray, record: int = 0) -> VecChunkTransition:
-        """Execute one chunk per env from steering noise z (N, steer_dim). With `record`, keep every step's model view
-        of the first `record` envs (the terminal frame of an episode is lost to the auto-reset)."""
+        """Execute one chunk per env from the actor's action z (N, cfg.act_dim) = [steering noise | unit residual]. With
+        `record`, keep every step's model view of the first `record` envs (the terminal frame of an episode is lost to
+        the auto-reset)."""
         n, zeros = self.num_envs, np.zeros(self.num_envs)
-        noise = build_noise(np.asarray(z, np.float32), self.cfg.noise_shape, self.cfg.steer_horizon)
+        z = np.asarray(z, np.float32)
+        noise = build_noise(z[:, : self.cfg.steer_dim], self.cfg.noise_shape, self.cfg.steer_horizon)
         chunks = self.base.query_batch(self.requests, noise)  # (N, H, A)
+        chunks = apply_residual(chunks, z[:, self.cfg.steer_dim :], self.cfg)
         alive = np.ones(n, bool)
         k = np.zeros(n, int)
         terms = {"success_bonus": zeros.copy()}

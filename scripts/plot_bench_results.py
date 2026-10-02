@@ -76,6 +76,7 @@ plt.close(fig)
 
 # ---------------------------------------------------------------- env scaling
 SERIES = {  # label: (color, marker, N, env-steps/s, Isaac MiB)
+    "Tiled, 2x720p": (ORANGE, "o", [4, 16, 32], [25.5, 67.6, 88.8], [6711, 14042, 26275]),
     "Tiled, 2x360p": (BLUE, "o", [4, 32, 64, 128], [28.0, 160, 246, 334], [4587, 9618, 14474, 24996]),
     "Tiled, 2x180p": (AQUA, "o", [256, 512], [837, 1083], [14946, 26689]),
 }
@@ -86,6 +87,8 @@ for label, (col, mk, n, sps, mem) in SERIES.items():
 # failures
 a2.plot([256], [44.3], "x", color=BLUE, ms=9, mew=2)
 a2.annotate("640x360 OOM at 256", (256, 44.3), xytext=(-8, -16), textcoords="offset points", fontsize=9, color=INK2, ha="right")
+a2.plot([64], [44.3], "x", color=ORANGE, ms=9, mew=2)
+a2.annotate("1280x720 OOM at 64", (64, 44.3), xytext=(-8, -34), textcoords="offset points", fontsize=9, color=INK2, ha="right")
 a2.axhline(44.3, color=INK2, lw=1, ls=(0, (4, 3)))
 a2.annotate("GPU limit (44 GiB)", (1, 44.3), xytext=(0, 4), textcoords="offset points", fontsize=9, color=INK2)
 for ax, yl, t in [(a1, "Env steps / second (all envs)", "Throughput"), (a2, "Isaac GPU memory (GiB)", "Memory")]:

@@ -18,15 +18,19 @@ class SteeringActor(nn.Module):
 
     For |u| << bound, z ~ u, and the output layer is zero-initialised (mean 0, std 1),
     so the untrained actor samples ~N(0, I) -- the base policy's own noise distribution.
+
+    With `res_dim > 0` the action is [z (steer_dim), r (res_dim)]: r is a squashed Gaussian with bound 1 (r in (-1, 1);
+    the caller scales it, e.g. by 0.01 rad, and adds it to the base policy's action chunk -- residual flow steering).
     """
 
     LOG_STD_MIN, LOG_STD_MAX = -5.0, 2.0
 
-    def __init__(self, feat_dim: int, steer_dim: int, bound: float = 3.0, hidden: int = 256):
+    def __init__(self, feat_dim: int, steer_dim: int, bound: float = 3.0, hidden: int = 256, res_dim: int = 0):
         super().__init__()
-        self.bound = bound
-        self.steer_dim = steer_dim
-        self.trunk = mlp(feat_dim, hidden, 2 * steer_dim)
+        self.steer_dim, self.res_dim = steer_dim, res_dim
+        self.act_dim = steer_dim + res_dim
+        self.register_buffer("bound", torch.cat([torch.full((steer_dim,), float(bound)), torch.ones(res_dim)]), persistent=False)
+        self.trunk = mlp(feat_dim, hidden, 2 * self.act_dim)
         nn.init.zeros_(self.trunk[-1].weight)
         nn.init.zeros_(self.trunk[-1].bias)
 

@@ -35,8 +35,11 @@ class TrainArgs:
     headless: bool = True
     instruction: str | None = None
     noise_shape: tuple[int, int] = (15, 32)  # pi05_droid_jointpos_polaris (action_horizon=15, action_dim=32)
-    encoder: str = "droid_proprio"  # droid_proprio | droid_vision
+    encoder: str = "droid_resnet50"  # droid_resnet50 | droid_vision (frozen dino) | droid_proprio
     vision_backbone: str = "facebook/dinov2-small"  # droid_vision only
+    finetune_encoder: bool = True  # droid_resnet50: train the backbone end-to-end with PPO (--no-finetune-encoder: frozen, features cached)
+    residual_scale: float = 0.01  # radians: the actor also outputs r in (-1,1) per arm joint per executed step (tanh of a
+    # Gaussian), added as residual_scale * r to the absolute joint targets. 0 disables it (plain DSRL).
     steer_horizon: int | None = None  # default: open_loop_horizon
     z_bound: float = 3.0
     gamma: float = 0.99  # per env step; a chunk of k steps is discounted by gamma^k
@@ -86,7 +89,7 @@ def main(args: TrainArgs):
     from polaris.policy.droid_jointpos_client import SimEvalsJointPosClient
     from polaris.policy.steered_client import ServerChunkPolicy
     from polaris.rl.evaluation import evaluate_vec
-    from polaris.rl.stats import EpisodeStats, MeanAccumulator, RollingMean
+    from polaris.rl.stats import EpisodeStats, RollingMean
     from polaris.rl.tasks import SIM_EVALS_INSTRUCTIONS, SIM_EVALS_SUCCESS_TERMS, VecSimEvalsTask, is_sim_evals
     from polaris.rl.vec_chunk_env import VecChunkEnv
     from polaris.rl.wandb_logger import WandbLogger
@@ -108,15 +111,21 @@ def main(args: TrainArgs):
         client = SimEvalsJointPosClient(args.policy)
         base = ServerChunkPolicy(client, args.noise_shape, args.server_batch_size)
     encoder_kwargs = {"backbone": args.vision_backbone} if args.encoder == "droid_vision" else {}
-    encoder = make_encoder(args.encoder, **encoder_kwargs)
+    finetune = args.finetune_encoder and args.encoder == "droid_resnet50"
+    if args.encoder == "droid_resnet50":
+        encoder_kwargs = {"finetune": finetune}
+    encoder = make_encoder(args.encoder, **encoder_kwargs, **({"device": args.rl_device} if args.encoder == "droid_resnet50" else {}))
     cfg = SteeringConfig(
         noise_shape=args.noise_shape, steer_horizon=args.steer_horizon or client.open_loop_horizon, feat_dim=encoder.feat_dim,
         encoder=args.encoder, encoder_kwargs=encoder_kwargs, z_bound=args.z_bound, hidden=args.ppo.hidden,
         base_policy="dummy" if args.dummy_policy else f"{args.policy.host}:{args.policy.port}",
+        residual_scale=args.residual_scale, residual_horizon=client.open_loop_horizon,
     )
-    ppo = DSRLPPO(cfg.feat_dim, cfg.steer_dim, cfg.z_bound, args.ppo, args.rl_device)
+    ppo = DSRLPPO(cfg.feat_dim, cfg.steer_dim, cfg.z_bound, args.ppo, args.rl_device, cfg.res_dim, encoder if finetune else None)
     venv = VecChunkEnv(env, client, base, encoder, cfg, instruction, args.gamma, args.success_bonus, VecSimEvalsTask(success_term))
-    buf = RolloutBuffer(args.rollout_chunks, args.num_envs, cfg.feat_dim, cfg.steer_dim, args.rl_device)
+    buf = RolloutBuffer(
+        args.rollout_chunks, args.num_envs, cfg.feat_dim, cfg.act_dim, args.rl_device, img_shape=(2, 224, 224, 3) if finetune else None
+    )
 
     run_name = f"{args.environment}-{datetime.now():%d%m-%H%M}-{uuid.uuid4().hex[:6]}"
     out_dir = Path(args.runs_root) / run_name
@@ -125,7 +134,7 @@ def main(args: TrainArgs):
     logger = WandbLogger(args.wandb_project, out_dir, asdict(args), args.wandb_entity, run_name, args.wandb_mode)
 
     def save(name: str):
-        save_checkpoint(out_dir / name, ppo.actor, cfg)  # loadable by SteeredPolicy / the Steered client
+        save_checkpoint(out_dir / name, ppo.actor, cfg, encoder if finetune else None)  # loadable by SteeredPolicy / the Steered client
         torch.save(ppo.state_dict(), out_dir / name / "ppo.pt")
 
     def run_eval(step: int):
@@ -140,6 +149,7 @@ def main(args: TrainArgs):
     transitions = env_steps = episodes = 0
     evaled_at_it = -1
     recent = RollingMean(window=args.num_envs)
+    ep_ma: dict[str, float] = {}
     if args.eval_at_start:
         run_eval(0)
     last_eval_end = time.perf_counter()
@@ -148,18 +158,18 @@ def main(args: TrainArgs):
     for it in range(1, args.iterations + 1):
         t0 = time.perf_counter()
         buf.reset()
-        finished, n_finished, success_ma = MeanAccumulator(), 0, {}
+        n_finished = 0
         for _ in range(args.rollout_chunks):
             z, logp, value = ppo.act(feat)
+            packed = venv.packed  # images/proprio of the obs `feat` was computed from (venv.step replaces them)
             t = venv.step(z)
-            buf.add(feat, z, logp, value, t.reward, t.discount, t.terminated, t.episode_over, t.truncated)
+            buf.add(feat, z, logp, value, t.reward, t.discount, t.terminated, t.episode_over, t.truncated, packed)
             for i in range(args.num_envs):
                 ep_stats[i].add(t.unbatch(i))
                 if t.episode_over[i]:
                     summary = ep_stats[i].summary()
-                    finished.add(summary)
                     n_finished += 1
-                    success_ma = recent.add({k: v for k, v in summary.items() if k.startswith("success/")})
+                    ep_ma = recent.add(summary)
                     ep_stats[i].reset()
                     episodes += 1
             feat = t.next_feat
@@ -174,12 +184,11 @@ def main(args: TrainArgs):
             rollout_s=t_rollout, update_s=t_update,
         )
         logger.log({**train_metrics, **perf}, transitions, prefix="train/")
-        if n_finished:  # means over the episodes that ended during this iteration
-            ep_metrics = {**finished.pop_means(), "episodes_finished": n_finished}
-            logger.log({**ep_metrics, **{f"{k}_ma": v for k, v in success_ma.items()}}, transitions, prefix="rollout/")
+        if n_finished:  # rolling means over the last num_envs finished episodes (only once that window is full)
+            logger.log({**{f"{k}_ma": v for k, v in ep_ma.items()}, "episodes_finished": n_finished}, transitions, prefix="rollout/")
         print(
             f"it {it} transitions {transitions} ({perf['transitions_per_sec']:.1f}/s) episodes {episodes} "
-            f"success_ma {success_ma.get('success/all', float('nan')):.3f} kl {train_metrics.get('approx_kl', 0):.4f}"
+            f"success_ma {ep_ma.get('success/all', float('nan')):.3f} kl {train_metrics.get('approx_kl', 0):.4f}"
         )
         if time.perf_counter() - last_eval_end >= args.eval_every_min * 60:
             run_eval(transitions)

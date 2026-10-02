@@ -124,8 +124,8 @@ def test_wandb_logger_offline(tmp_path):
 
 def test_rolling_mean():
     r = RollingMean(window=2)
-    r.add({"a": 1.0})
-    r.add({"a": 0.0})
+    assert r.add({"a": 1.0}) == {}  # window not full yet
+    assert r.add({"a": 0.0}) == {"a": 0.5}
     assert r.add({"a": 0.0}) == {"a": 0.0}
 
 

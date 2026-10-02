@@ -110,3 +110,23 @@ Unchanged: `Steered` client with `policy.steering_ckpt=<run>/ckpt_X` (+ `determi
 `tests/test_ppo.py` (logp inversion, batched noise, GAE with SMDP discount / truncation / termination, PPO bandit),
 `tests/test_vec_chunk_env.py` (fake auto-resetting N-env: masking, hold action, gamma^k, refresh, unbatch, evaluate_vec).
 Run: `isaacpy -m pytest tests/`.
+
+## Residual steering + finetuned ResNet50 encoder
+
+**Action space (verified):** the pi0.5 `pi05_droid_jointpos_polaris` chunk is ABSOLUTE joint positions (openpi's `AbsoluteActions`
+adds the current state back), and the sim `JointPositionActionCfg(use_default_offset=False, scale=1)` treats it as an absolute
+target. Gripper is dim 7 (binarised at 0.5). So a residual is in radians on dims 0-6.
+
+**Residual (`--residual-scale`, default 0.01; 0 = plain DSRL).** The actor's action becomes `[z (steer_dim), r (res_dim)]`,
+`res_dim = open_loop_horizon * 7`. `r` is a squashed Gaussian in (-1, 1) (same tanh logp machinery; per-dim `bound` buffer in
+`SteeringActor`, 1 for residual dims). The env adds `residual_scale * r` to the arm joints of chunk steps `[:residual_horizon]`
+(`apply_residual` in `latent_rl/steered_policy.py`, used by `VecChunkEnv.step`, `SteeredPolicy.step`). Rollout buffer `z` holds the
+full action. `SteeringConfig` stores `residual_scale` / `residual_horizon`. Logged: `train/res_abs_mean` (unit scale; x scale = rad).
+
+**Encoder (`--encoder droid_resnet50`, default).** Shared ImageNet ResNet50 over exterior+wrist, pooled 2048-d each, layer-normed, +
+proprio -> 4104-d. `--finetune-encoder` (default true; `--no-finetune-encoder` freezes and caches features like dino). Finetune mode:
+`RolloutBuffer(img_shape=...)` also stores uint8 images + proprio; `DSRLPPO.update` re-encodes each minibatch (no-grad, microbatched),
+runs the PPO loss on the feature leaf, then recomputes each microbatch with grad and backprops `d loss/d feat` (bounded memory).
+Separate Adam group `ppo.encoder_lr` (3e-5), separate grad clip, `ppo.encoder_microbatch` (32). BatchNorm is always eval mode. bf16
+autocast. Checkpoints add `encoder.pt`; `SteeredPolicy.from_checkpoint` loads it. Pretrained weights come from torchvision
+(`IMAGENET1K_V2`, downloaded to the torch hub cache - warm it on a node with internet).

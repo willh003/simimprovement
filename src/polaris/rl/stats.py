@@ -60,7 +60,9 @@ class MeanAccumulator:
 
 
 class RollingMean:
-    """Moving average over the last `window` values of each key (e.g. recent success rate)."""
+    """Moving average over the last `window` values of each key (e.g. recent success rate).
+
+    `add` only returns keys whose window is full, so early values (n=1 -> exactly 0 or 1) are never reported."""
 
     def __init__(self, window: int = 10):
         self.window = window
@@ -69,4 +71,4 @@ class RollingMean:
     def add(self, metrics: dict[str, float]) -> dict[str, float]:
         for k, v in metrics.items():
             self.values[k] = (self.values[k] + [float(v)])[-self.window :]
-        return {k: float(np.mean(v)) for k, v in self.values.items()}
+        return {k: float(np.mean(v)) for k, v in self.values.items() if len(v) >= self.window}

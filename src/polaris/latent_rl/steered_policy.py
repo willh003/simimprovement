@@ -1,9 +1,10 @@
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 import torch
 
-from polaris.latent_rl.checkpoint import SteeringConfig, load_checkpoint
+from polaris.latent_rl.checkpoint import ARM_DOF, SteeringConfig, load_checkpoint
 from polaris.latent_rl.encoders import make_encoder
 from polaris.latent_rl.interfaces import ChunkPolicy, ObsEncoder
 from polaris.latent_rl.networks import SteeringActor
@@ -21,10 +22,21 @@ def build_noise(z: np.ndarray, noise_shape: tuple[int, int], steer_horizon: int)
     return noise
 
 
+def apply_residual(chunk: np.ndarray, res: np.ndarray, cfg: SteeringConfig) -> np.ndarray:
+    """chunk (..., H, 8) absolute joint targets + gripper; res (..., res_dim) unit residual in (-1, 1).
+    Adds `cfg.residual_scale * res` (radians) to the arm joints of the first `residual_horizon` steps."""
+    if cfg.res_dim == 0:
+        return chunk
+    chunk = np.array(chunk, dtype=np.float32, copy=True)
+    h = cfg.residual_horizon
+    chunk[..., :h, :ARM_DOF] += cfg.residual_scale * np.asarray(res, np.float32).reshape(*res.shape[:-1], h, ARM_DOF)
+    return chunk
+
+
 @dataclass
 class SteerOutput:
     chunk: np.ndarray
-    z: np.ndarray  # steered slice, flat (steer_dim,)
+    z: np.ndarray  # the actor's full action, flat (act_dim,) = [steering noise (steer_dim), unit residual (res_dim)]
     feat: np.ndarray
 
 
@@ -40,7 +52,13 @@ class SteeredPolicy:
     @classmethod
     def from_checkpoint(cls, path, base: ChunkPolicy, deterministic: bool = True, device="cpu"):
         actor, cfg = load_checkpoint(path, device)
-        encoder = make_encoder(cfg.encoder, **cfg.encoder_kwargs)
+        kwargs = dict(cfg.encoder_kwargs)
+        weights = Path(path) / "encoder.pt"
+        if weights.exists():  # finetuned encoder: skip the pretrained download, load the saved weights
+            kwargs.update(pretrained=False, device=device)
+        encoder = make_encoder(cfg.encoder, **kwargs)
+        if weights.exists():
+            encoder.load_state_dict(torch.load(weights, map_location=device))
         return cls(actor, cfg, encoder, base, deterministic, device)
 
     def build_noise(self, z: np.ndarray) -> np.ndarray:
@@ -50,6 +68,8 @@ class SteeredPolicy:
     def step(self, obs: dict, feat: np.ndarray | None = None) -> SteerOutput:
         if feat is None:
             feat = self.encoder(obs)
-        z, _ = self.actor(torch.as_tensor(feat, dtype=torch.float32, device=self.device)[None], self.deterministic)
-        z = z[0].cpu().numpy()
-        return SteerOutput(self.base.query(obs, self.build_noise(z)), z, feat)
+        a, _ = self.actor(torch.as_tensor(feat, dtype=torch.float32, device=self.device)[None], self.deterministic)
+        a = a[0].cpu().numpy()
+        z, res = a[: self.cfg.steer_dim], a[self.cfg.steer_dim :]
+        chunk = apply_residual(self.base.query(obs, self.build_noise(z)), res, self.cfg)
+        return SteerOutput(chunk, a, feat)

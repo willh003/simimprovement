@@ -38,6 +38,10 @@ so far). Empty GPU (no pi server), `external_cam_2` dropped:
 | 640x360 | 64 | 14474 | 260 | 246 |
 | 640x360 | 128 | 24996 | 383 | 334 |
 | 640x360 | 256 | **OOM** (44.3 GiB) | | |
+| 1280x720 | 4 | 6711 | 157 | 25.5 |
+| 1280x720 | 16 | 14042 | 237 | 67.6 |
+| 1280x720 | 32 | 26275 | 360 | 88.8 |
+| 1280x720 | 64 | **OOM** (44.2 GiB) | | |
 | 320x180 | 256 | 14946 | 306 | **837** |
 | 320x180 | 512 | 26689 | 473 | **1083** |
 (~0.05 GB/env at 320x180 above a ~2-3 GB base; 1024 would extrapolate to ~50 GB, so ~700-800 is the memory ceiling; throughput gains are flattening: 256 -> 512 gives only +30%.)
