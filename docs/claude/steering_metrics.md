@@ -25,6 +25,7 @@ which are computed once on the whole rollout buffer after the update.
 | `epochs` | PPO epochs actually run (max `cfg.epochs`). | Stuck below max means `target_kl` early stopping is binding every iteration. |
 | `grad_norm` | Global grad norm of actor+critic **before** clipping to `max_grad_norm`. | Always > clip means the step size is set by lr and the clip, not gradient magnitude. |
 | `enc_grad_norm` | Same for the finetuned encoder. | Only logged when the encoder is trained. |
+| `warmup` | `1` during critic-warmup iterations (`--critic-warmup-iters`), absent otherwise. | While present, `pg_loss`, `entropy`, `approx_kl`, `clipfrac` are not logged and the actor does not change. Watch `explained_var`. |
 
 ### Critic quality
 | Metric | Meaning | How to read it |
@@ -59,36 +60,39 @@ which are computed once on the whole rollout buffer after the update.
 
 ## `rollout/*` — training (stochastic-policy) episodes
 
-Logged only for iterations in which at least one episode finished. Values are **means over episodes that ended during
-that iteration**, so with long episodes they can be based on just 1–5 episodes and are very noisy.
+Logged in iterations where at least one episode finished. Every episode metric is logged **only as a rolling mean**
+(`_ma` suffix = moving average over the last `num_envs` finished episodes), and only once that window is full, so the
+first rollout rows appear after ~`num_envs` episodes have finished. Raw per-iteration means are deliberately not logged:
+they are biased (failures time out together in one bulk iteration, successes trickle in 1–5 at a time) and swing between
+0 and 1.
 
 | Metric | Meaning |
 |---|---|
-| `return` | Sum of per-chunk rewards over the episode (all reward terms plus bonus). |
-| `return/<term>` | Same, per reward term (e.g. `obj_near_container`, `obj_in_container`, `success_bonus`). Terms are defined by the task; the sparse ones are partial-credit rewards for reaching a criterion. |
-| `success/all` | 0/1 overall task success of the episode (the env's success termination). |
-| `success/<term>` | 0/1 whether that sparse criterion was reached; the mean is the criterion's success rate. |
-| `success/all_ma`, `success/<term>_ma` | **Rolling mean** over the last `num_envs` finished episodes. Use these for plots: they are the smooth success-rate curve. |
-| `length_chunks`, `length_steps` | Episode length in action chunks / sim steps. Shorter on success (early termination), so falling length usually accompanies rising success. |
-| `episodes_finished` | How many episodes ended this iteration (also the sample size of the means above). |
-| `final_progress` | Rubric progress at the end of the episode, if the task provides one. |
+| `return_ma` | Mean sum of per-chunk rewards over an episode (all reward terms plus bonus). |
+| `return/<term>_ma` | Same, per reward term (e.g. `obj_near_container`, `obj_in_container`, `success_bonus`). Terms are defined by the task. |
+| `success/all_ma` | Rolling success rate (the env's success termination). This is the main training-success curve. |
+| `success/<term>_ma` | Rolling rate at which that sparse criterion was reached. |
+| `length_chunks_ma`, `length_steps_ma` | Episode length in action chunks / sim steps. Shorter on success (early termination), so falling length usually accompanies rising success. |
+| `final_progress_ma` | Rubric progress at the end of the episode, if the task provides one. |
+| `episodes_finished` | How many episodes ended this iteration (not averaged). |
 
 Note: `success_bonus` is 0 unless configured, in which case `success/all` and the success-based terms are the only
-success signal.
+success signal. Runs made before this change also contain raw `rollout/<name>` (per-iteration means, unreliable) and
+`_ma` values from n<`num_envs` episodes (e.g. exactly 1.0 at the start); ignore those.
 
 ## `eval/fixed/*` — deterministic evaluation
 
 Run every `eval_every_min` minutes of wall-clock time (plus at step 0 if `eval_at_start`). One deterministic-policy
 episode in every env (`episodes` = `num_envs`), so each value is a mean over `num_envs` episodes with a fixed set of
 initial conditions per run. It uses the same keys as `rollout/*` (`return`, `return/<term>`, `success/*`,
-`length_chunks`, `length_steps`) without the `_ma` variants, plus:
+`length_chunks`, `length_steps`) (no `_ma` suffix; one value per eval), plus:
 
 | Metric | Meaning |
 |---|---|
 | `episodes` | Number of eval episodes (= `num_envs`). |
 | `time_s` | Wall time of the eval. Can be a large fraction of total runtime. |
 
-Eval is deterministic (mean action), so it can be better or worse than `rollout/*`, which samples from the policy.
+Eval is deterministic (mean action), so it can be better or worse than `rollout/*_ma`, which samples from the policy.
 The eval step is the transition count at which it ran, so it lines up with the train/rollout x-axis.
 
 ## Quick diagnostics

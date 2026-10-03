@@ -21,10 +21,12 @@ class SteeringConfig:
     encoder_kwargs: dict = field(default_factory=dict)
     residual_scale: float = 0.0  # radians; 0 disables the residual (plain DSRL)
     residual_horizon: int = 0  # leading chunk steps that get a residual on the 7 arm joints (absolute joint targets)
+    broadcast_noise: bool = False  # actor outputs ONE noise vector (action_dim), copied into all steer_horizon rows
+    priv_dim: int = 0  # privileged sim state appended to feat for the actor (and critic); 0: none. Not available on real robots
 
     @property
     def steer_dim(self) -> int:
-        return self.steer_horizon * self.noise_shape[1]
+        return (1 if self.broadcast_noise else self.steer_horizon) * self.noise_shape[1]
 
     @property
     def res_dim(self) -> int:
@@ -51,6 +53,6 @@ def load_checkpoint(path, device="cpu") -> tuple[SteeringActor, SteeringConfig]:
     d = json.loads((path / "config.json").read_text())
     d["noise_shape"] = tuple(d["noise_shape"])
     cfg = SteeringConfig(**d)
-    actor = SteeringActor(cfg.feat_dim, cfg.steer_dim, cfg.z_bound, cfg.hidden, cfg.res_dim).to(device)
+    actor = SteeringActor(cfg.feat_dim + cfg.priv_dim, cfg.steer_dim, cfg.z_bound, cfg.hidden, cfg.res_dim).to(device)
     actor.load_state_dict(torch.load(path / "actor.pt", map_location=device))
     return actor.eval(), cfg

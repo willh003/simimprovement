@@ -35,21 +35,28 @@ class TrainArgs:
     headless: bool = True
     instruction: str | None = None
     noise_shape: tuple[int, int] = (15, 32)  # pi05_droid_jointpos_polaris (action_horizon=15, action_dim=32)
-    encoder: str = "droid_resnet50"  # droid_resnet50 | droid_vision (frozen dino) | droid_proprio
-    vision_backbone: str = "facebook/dinov2-small"  # droid_vision only
-    finetune_encoder: bool = True  # droid_resnet50: train the backbone end-to-end with PPO (--no-finetune-encoder: frozen, features cached)
+    encoder: str = "droid_resnet50"  # droid_resnet50 | droid_vision (dinov2) | droid_proprio
+    dino_backbone: str = "facebook/dinov2-small"  # HF model id; only used when encoder == droid_vision
+    finetune_encoder: bool = True  # droid_resnet50 / droid_vision: train the backbone end-to-end with PPO (--no-finetune-encoder: frozen, features cached)
     residual_scale: float = 0.01  # radians: the actor also outputs r in (-1,1) per arm joint per executed step (tanh of a
     # Gaussian), added as residual_scale * r to the absolute joint targets. 0 disables it (plain DSRL).
+    privileged: bool = True  # actor + critic also see ground-truth sim state (object pose/velocity, goal = container pose); the
+    # base policy never does. --no-privileged: image/proprio features only. Checkpoints trained with it need the state at deployment
     steer_horizon: int | None = None  # default: open_loop_horizon
+    broadcast_noise: bool = True  # the actor predicts one noise vector (action_dim), broadcast over the steered rows of the
+    # chunk noise (the first steer_horizon rows; the rest stay N(0, I)). False: a separate noise per steered row
     z_bound: float = 3.0
     gamma: float = 0.99  # per env step; a chunk of k steps is discounted by gamma^k
     success_bonus: float = 0.0  # the success reward term already pays 1
     ppo: PPOConfig = field(default_factory=PPOConfig)
+    critic_warmup_iters: int = 0  # leading iterations that only fit the critic (actor frozen; rollouts use the initial ~N(0, I) actor)
+    warmup_train_encoder: bool = False  # also train the finetuned encoder with the value loss during warmup (default: frozen)
+    warmup_min_explained_var: float | None = None  # end warmup early once the critic's explained_var exceeds this
     rl_device: str = "cuda"  # PPO nets + rollout buffer (CPU updates are ~100x slower next to Isaac)
     rollout_chunks: int = 8  # chunks per env per PPO iteration (batch = num_envs * rollout_chunks transitions)
     iterations: int = 300
     save_every: int = 25  # iterations
-    eval_every_min: float = 20.0  # wall-clock minutes of training between evals (checked after each PPO iteration, so it
+    eval_every_min: float = 30.0  # wall-clock minutes of training between evals (checked after each PPO iteration, so it
     # overshoots by up to one iteration); eval = one deterministic episode in every env. Independent of num_envs/rollout_chunks
     eval_at_start: bool = True
     eval_videos: int = 2
@@ -72,6 +79,17 @@ class HoldPoseBase:
         return np.repeat(joint[:, None], self.noise_shape[0], axis=1)
 
 
+def find_nonfinite(**arrays) -> dict[str, np.ndarray]:
+    """{name: env indices} of the (N, ...) arrays with a NaN/inf in that env's row."""
+    out = {}
+    for name, a in arrays.items():
+        if a is not None:
+            bad = np.flatnonzero(~np.isfinite((a.detach().cpu().numpy() if torch.is_tensor(a) else np.asarray(a)).astype(np.float64).reshape(len(a), -1)).all(-1))
+            if len(bad):
+                out[name] = bad
+    return out
+
+
 def main(args: TrainArgs):
     parser = argparse.ArgumentParser()
     args_cli, _ = parser.parse_known_args()
@@ -89,7 +107,8 @@ def main(args: TrainArgs):
     from polaris.policy.droid_jointpos_client import SimEvalsJointPosClient
     from polaris.policy.steered_client import ServerChunkPolicy
     from polaris.rl.evaluation import evaluate_vec
-    from polaris.rl.stats import EpisodeStats, RollingMean
+    from polaris.rl.privileged import SimEvalsPrivileged
+    from polaris.rl.stats import EpisodeStats, MeanAccumulator, RollingMean
     from polaris.rl.tasks import SIM_EVALS_INSTRUCTIONS, SIM_EVALS_SUCCESS_TERMS, VecSimEvalsTask, is_sim_evals
     from polaris.rl.vec_chunk_env import VecChunkEnv
     from polaris.rl.wandb_logger import WandbLogger
@@ -110,21 +129,25 @@ def main(args: TrainArgs):
     else:
         client = SimEvalsJointPosClient(args.policy)
         base = ServerChunkPolicy(client, args.noise_shape, args.server_batch_size)
-    encoder_kwargs = {"backbone": args.vision_backbone} if args.encoder == "droid_vision" else {}
-    finetune = args.finetune_encoder and args.encoder == "droid_resnet50"
-    if args.encoder == "droid_resnet50":
-        encoder_kwargs = {"finetune": finetune}
-    encoder = make_encoder(args.encoder, **encoder_kwargs, **({"device": args.rl_device} if args.encoder == "droid_resnet50" else {}))
+    priv_fn = SimEvalsPrivileged(env, success_term) if args.privileged else None
+    image_encoder = args.encoder in ("droid_resnet50", "droid_vision")
+    finetune = args.finetune_encoder and image_encoder
+    encoder_kwargs = {"finetune": finetune} if image_encoder else {}
+    if args.encoder == "droid_vision":
+        encoder_kwargs["backbone"] = args.dino_backbone
+    encoder = make_encoder(args.encoder, **encoder_kwargs, **({"device": args.rl_device} if image_encoder else {}))
     cfg = SteeringConfig(
         noise_shape=args.noise_shape, steer_horizon=args.steer_horizon or client.open_loop_horizon, feat_dim=encoder.feat_dim,
-        encoder=args.encoder, encoder_kwargs=encoder_kwargs, z_bound=args.z_bound, hidden=args.ppo.hidden,
+        encoder=args.encoder, encoder_kwargs=encoder_kwargs, z_bound=args.z_bound, hidden=args.ppo.hidden, broadcast_noise=args.broadcast_noise,
         base_policy="dummy" if args.dummy_policy else f"{args.policy.host}:{args.policy.port}",
         residual_scale=args.residual_scale, residual_horizon=client.open_loop_horizon,
+        priv_dim=priv_fn.dim if priv_fn else 0,
     )
-    ppo = DSRLPPO(cfg.feat_dim, cfg.steer_dim, cfg.z_bound, args.ppo, args.rl_device, cfg.res_dim, encoder if finetune else None)
-    venv = VecChunkEnv(env, client, base, encoder, cfg, instruction, args.gamma, args.success_bonus, VecSimEvalsTask(success_term))
+    ppo = DSRLPPO(cfg.feat_dim, cfg.steer_dim, cfg.z_bound, args.ppo, args.rl_device, cfg.res_dim, encoder if finetune else None, cfg.priv_dim)
+    venv = VecChunkEnv(env, client, base, encoder, cfg, instruction, args.gamma, args.success_bonus, VecSimEvalsTask(success_term), priv_fn)
     buf = RolloutBuffer(
-        args.rollout_chunks, args.num_envs, cfg.feat_dim, cfg.act_dim, args.rl_device, img_shape=(2, 224, 224, 3) if finetune else None
+        args.rollout_chunks, args.num_envs, cfg.feat_dim, cfg.act_dim, args.rl_device, img_shape=(2, 224, 224, 3) if finetune else None,
+        priv_dim=cfg.priv_dim,
     )
 
     run_name = f"{args.environment}-{datetime.now():%d%m-%H%M}-{uuid.uuid4().hex[:6]}"
@@ -139,7 +162,7 @@ def main(args: TrainArgs):
 
     def run_eval(step: int):
         t0 = time.perf_counter()
-        metrics, videos = evaluate_vec(venv, lambda f: ppo.act(f, deterministic=True)[0], args.eval_videos)
+        metrics, videos = evaluate_vec(venv, lambda f: ppo.act(f, deterministic=True, priv=venv.priv)[0], args.eval_videos)
         metrics["time_s"] = time.perf_counter() - t0
         logger.log(metrics, step, prefix="eval/fixed/")
         for i, frames in enumerate(videos):
@@ -149,7 +172,7 @@ def main(args: TrainArgs):
     transitions = env_steps = episodes = 0
     evaled_at_it = -1
     recent = RollingMean(window=args.num_envs)
-    ep_ma: dict[str, float] = {}
+    warmup_iters = args.critic_warmup_iters  # counted by the iteration index (there is no resume path in this script)
     if args.eval_at_start:
         run_eval(0)
     last_eval_end = time.perf_counter()
@@ -158,37 +181,70 @@ def main(args: TrainArgs):
     for it in range(1, args.iterations + 1):
         t0 = time.perf_counter()
         buf.reset()
-        n_finished = 0
+        finished, n_finished, success_ma = MeanAccumulator(), 0, {}
+        bad_log = []  # (chunk, field, env ids): non-finite / out-of-range rollout data, skips this iteration's update
         for _ in range(args.rollout_chunks):
-            z, logp, value = ppo.act(feat)
+            z, logp, value = ppo.act(feat, priv=venv.priv)
+            priv = venv.priv  # privileged state of the obs `feat` was computed from
             packed = venv.packed  # images/proprio of the obs `feat` was computed from (venv.step replaces them)
             t = venv.step(z)
-            buf.add(feat, z, logp, value, t.reward, t.discount, t.terminated, t.episode_over, t.truncated, packed)
+            bad = find_nonfinite(reward=t.reward, feat=t.next_feat, value=value, logp=logp)
+            if priv_fn is not None and len(priv_fn.bad_envs):  # raw state non-finite / out of range (priv_fn sanitizes its output)
+                if len(priv_fn.nonfinite_envs):
+                    bad["priv_nonfinite"] = priv_fn.nonfinite_envs
+                else:  # clipped, so the data stays usable: warn only
+                    print(f"it {it} chunk {len(buf)}: priv out of range (clipped) in envs {priv_fn.bad_envs.tolist()}: {priv_fn.raw_bad}")
+            for name, ids in bad.items():
+                bad_log.append((len(buf), name, ids.tolist()))
+                print(f"it {it} chunk {len(buf)}: bad {name} in envs {ids.tolist()}"
+                      + (f"\n  raw priv rows: {priv_fn.raw_bad}" if name == "priv_nonfinite" else ""))
+            buf.add(feat, z, logp, value, t.reward, t.discount, t.terminated, t.episode_over, t.truncated, packed, priv)
             for i in range(args.num_envs):
                 ep_stats[i].add(t.unbatch(i))
                 if t.episode_over[i]:
                     summary = ep_stats[i].summary()
+                    finished.add(summary)
                     n_finished += 1
-                    ep_ma = recent.add(summary)
+                    success_ma = recent.add({k: v for k, v in summary.items() if k.startswith("success/")})
                     ep_stats[i].reset()
                     episodes += 1
             feat = t.next_feat
             env_steps += int(t.steps.sum())
         transitions += len(buf)
         t_rollout = time.perf_counter() - t0
-        buf.compute_returns(ppo.value(feat), args.ppo.gae_lambda)
-        train_metrics = ppo.update(buf)
+        last_value = ppo.value(feat, venv.priv)
+        if priv_fn is not None and len(priv_fn.nonfinite_envs):
+            bad_log.append((len(buf), "priv_nonfinite(last)", priv_fn.nonfinite_envs.tolist()))
+        for name, ids in find_nonfinite(last_value=last_value, last_feat=feat).items():
+            bad_log.append((len(buf), name, ids.tolist()))
+        buf.compute_returns(last_value, args.ppo.gae_lambda)
+        if not bad_log:  # also catch bad data that only shows up after GAE
+            bad_log = [(len(buf), k, v.tolist()) for k, v in find_nonfinite(adv=buf.d["adv"].T, ret=buf.d["ret"].T).items()]
+        if bad_log:
+            torch.save(dict(it=it, bad=bad_log, buf=dict(buf.d), last_value=last_value), out_dir / f"bad_rollout_{it}.pt")
+            print(f"it {it}: bad rollout data {bad_log}; update skipped, dumped bad_rollout_{it}.pt, envs reset")
+            logger.log({"bad_rollouts": 1, "iteration": it}, transitions, prefix="train/")
+            feat = venv.reset()
+            for s_ in ep_stats:
+                s_.reset()
+            continue
+        warming = it <= warmup_iters
+        train_metrics = ppo.update(buf, train_policy=not warming, warmup_train_encoder=args.warmup_train_encoder)
+        if warming and args.warmup_min_explained_var is not None and train_metrics["explained_var"] > args.warmup_min_explained_var:
+            warmup_iters = it  # critic is good enough: policy updates start next iteration
         t_update = time.perf_counter() - t0 - t_rollout
         perf = dict(
             iteration=it, env_steps=env_steps, episodes=episodes, transitions_per_sec=len(buf) / (t_rollout + t_update),
             rollout_s=t_rollout, update_s=t_update,
+            gpu_peak_gb=torch.cuda.max_memory_allocated() / 2**30 if torch.cuda.is_available() else 0.0,
         )
         logger.log({**train_metrics, **perf}, transitions, prefix="train/")
-        if n_finished:  # rolling means over the last num_envs finished episodes (only once that window is full)
-            logger.log({**{f"{k}_ma": v for k, v in ep_ma.items()}, "episodes_finished": n_finished}, transitions, prefix="rollout/")
+        if n_finished:  # means over the episodes that ended during this iteration
+            ep_metrics = {**finished.pop_means(), "episodes_finished": n_finished}
+            logger.log({**ep_metrics, **{f"{k}_ma": v for k, v in success_ma.items()}}, transitions, prefix="rollout/")
         print(
             f"it {it} transitions {transitions} ({perf['transitions_per_sec']:.1f}/s) episodes {episodes} "
-            f"success_ma {ep_ma.get('success/all', float('nan')):.3f} kl {train_metrics.get('approx_kl', 0):.4f}"
+            f"success_ma {success_ma.get('success/all', float('nan')):.3f} kl {train_metrics.get('approx_kl', 0):.4f}"
         )
         if time.perf_counter() - last_eval_end >= args.eval_every_min * 60:
             run_eval(transitions)

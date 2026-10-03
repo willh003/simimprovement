@@ -25,6 +25,7 @@ class VecChunkTransition:
     success: np.ndarray  # bool
     reached: dict[str, np.ndarray]
     frames: list[list[np.ndarray]] = field(default_factory=list)  # model-view frames of the first `record` envs
+    next_priv: np.ndarray | None = None  # (N, priv_dim) privileged state matching next_feat
 
     def unbatch(self, i: int) -> ChunkTransition:
         """Env i's transition as a single-env ChunkTransition (for EpisodeStats)."""
@@ -46,14 +47,15 @@ class VecChunkEnv:
     """
 
     def __init__(self, env, client, base: BatchChunkPolicy, encoder: ObsEncoder, cfg: SteeringConfig, instruction: str,
-                 gamma: float = 0.99, success_bonus: float = 0.0, task=None):
+                 gamma: float = 0.99, success_bonus: float = 0.0, task=None, priv_fn=None):
         if tuple(base.noise_shape) != tuple(cfg.noise_shape):
             raise ValueError(f"noise_shape mismatch: base {base.noise_shape} vs cfg {cfg.noise_shape}")
         self.env, self.client, self.base, self.encoder, self.cfg, self.task = env, client, base, encoder, cfg, task
         self.instruction, self.gamma, self.success_bonus = instruction, gamma, success_bonus
         self.horizon = client.open_loop_horizon
         self.device = getattr(env.unwrapped, "device", "cpu")
-        self.obs = self.requests = self.views = self.feat = self.packed = None
+        self.priv_fn = priv_fn  # () -> (N, priv_dim) ground-truth state for the actor/critic only (never the base policy)
+        self.obs = self.requests = self.views = self.feat = self.packed = self.priv = None
         self.num_envs = 0
 
     def _observe(self):
@@ -64,6 +66,7 @@ class VecChunkEnv:
         else:
             self.feat = encode_batch(self.encoder, self.requests)
         self.num_envs = len(self.requests)
+        self.priv = self.priv_fn() if self.priv_fn is not None else None
         return self.feat
 
     def reset(self) -> np.ndarray:
@@ -77,7 +80,7 @@ class VecChunkEnv:
         the auto-reset)."""
         n, zeros = self.num_envs, np.zeros(self.num_envs)
         z = np.asarray(z, np.float32)
-        noise = build_noise(z[:, : self.cfg.steer_dim], self.cfg.noise_shape, self.cfg.steer_horizon)
+        noise = build_noise(z[:, : self.cfg.steer_dim], self.cfg.noise_shape, self.cfg.steer_horizon, self.cfg.broadcast_noise)
         chunks = self.base.query_batch(self.requests, noise)  # (N, H, A)
         chunks = apply_residual(chunks, z[:, self.cfg.steer_dim :], self.cfg)
         alive = np.ones(n, bool)
@@ -118,5 +121,5 @@ class VecChunkEnv:
         self._observe()
         return VecChunkTransition(
             self.feat, sum(terms.values()), terms, terminated, truncated, terminated | truncated, self.gamma**k, k,
-            success, reached, frames,
+            success, reached, frames, self.priv,
         )

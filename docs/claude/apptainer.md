@@ -3,7 +3,7 @@ To run with isaacsim, you need a gpu, and you need to use an apptainer. To enter
 ```/gscratch/weirdlab/will/polaris_overlay.sh.```
 
 
-I'm not sure exactly how you would enter an apptainer if you weren't on an interactive session. Next time you figure that out, you should replace this section with that info.
+For non-interactive runs (agents) see docs/claude/cluster_runs.md.
 
 
 To get gpus, you can use these commands (defined in ~\.bashrc):

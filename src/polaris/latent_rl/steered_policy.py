@@ -10,15 +10,16 @@ from polaris.latent_rl.interfaces import ChunkPolicy, ObsEncoder
 from polaris.latent_rl.networks import SteeringActor
 
 
-def build_noise(z: np.ndarray, noise_shape: tuple[int, int], steer_horizon: int) -> np.ndarray:
-    """Full model noise: z in the first `steer_horizon` rows, N(0, I) elsewhere.
+def build_noise(z: np.ndarray, noise_shape: tuple[int, int], steer_horizon: int, broadcast: bool = False) -> np.ndarray:
+    """Full model noise: z in the first `steer_horizon` rows, N(0, I) elsewhere. With `broadcast`, z is a single noise
+    vector (action_dim,) copied into all `steer_horizon` rows.
 
     z: (steer_dim,) -> (action_horizon, action_dim), or batched (N, steer_dim) -> (N, action_horizon, action_dim).
     """
     ah, ad = noise_shape
     batch = z.shape[:-1]
     noise = np.random.randn(*batch, ah, ad).astype(np.float32)
-    noise[..., :steer_horizon, :] = z.reshape(*batch, steer_horizon, ad)
+    noise[..., :steer_horizon, :] = z.reshape(*batch, 1, ad) if broadcast else z.reshape(*batch, steer_horizon, ad)
     return noise
 
 
@@ -62,13 +63,18 @@ class SteeredPolicy:
         return cls(actor, cfg, encoder, base, deterministic, device)
 
     def build_noise(self, z: np.ndarray) -> np.ndarray:
-        return build_noise(z, self.cfg.noise_shape, self.cfg.steer_horizon)
+        return build_noise(z, self.cfg.noise_shape, self.cfg.steer_horizon, self.cfg.broadcast_noise)
 
     @torch.no_grad()
-    def step(self, obs: dict, feat: np.ndarray | None = None) -> SteerOutput:
+    def step(self, obs: dict, feat: np.ndarray | None = None, priv: np.ndarray | None = None) -> SteerOutput:
         if feat is None:
             feat = self.encoder(obs)
-        a, _ = self.actor(torch.as_tensor(feat, dtype=torch.float32, device=self.device)[None], self.deterministic)
+        x = torch.as_tensor(feat, dtype=torch.float32, device=self.device)[None]
+        if self.cfg.priv_dim:  # actor trained with privileged sim state: only usable where the caller can supply it
+            if priv is None:
+                raise ValueError(f"checkpoint needs privileged state (priv_dim={self.cfg.priv_dim})")
+            x = torch.cat([x, torch.as_tensor(priv, dtype=torch.float32, device=self.device)[None]], dim=-1)
+        a, _ = self.actor(x, self.deterministic)
         a = a[0].cpu().numpy()
         z, res = a[: self.cfg.steer_dim], a[self.cfg.steer_dim :]
         chunk = apply_residual(self.base.query(obs, self.build_noise(z)), res, self.cfg)

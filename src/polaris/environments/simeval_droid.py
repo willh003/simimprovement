@@ -394,20 +394,11 @@ class EnvCfg(ManagerBasedRLEnvCfg):
         self.rewards = RewardsCfg()
         step_dt = self.sim.dt * self.decimation  # the reward manager scales terms by step_dt; cancel it so rewards are exactly 0/1
         if str(scene_name) == "2":
-            # "put the can in the mug": sparse reward of 1 while the can rests in the mug,
-            # plus a smaller shaping reward while it is above the mug but too high to count
+            # "put the can in the mug": sparse reward of 1 while the can rests in the mug
             self.rewards.can_in_mug = RewTerm(
                 func=object_in_container,
                 weight=1.0 / step_dt,
                 params={ 
-                    "object_cfg": SceneEntityCfg("_10_potted_meat_can"),
-                    "container_cfg": SceneEntityCfg("_25_mug"),
-                },
-            )
-            self.rewards.can_near_mug = RewTerm(
-                func=object_near_container,
-                weight=0.25 / step_dt,
-                params={
                     "object_cfg": SceneEntityCfg("_10_potted_meat_can"),
                     "container_cfg": SceneEntityCfg("_25_mug"),
                 },
@@ -419,10 +410,6 @@ class EnvCfg(ManagerBasedRLEnvCfg):
             params = {"object_cfg": SceneEntityCfg(obj), "container_cfg": SceneEntityCfg(cont), **task["thresholds"]}
             self.rewards.obj_in_container = RewTerm(
                 func=object_in_container, weight=1.0 / step_dt, params={**params, "z_max": task["success_z_max"]}
-            )
-            self.rewards.obj_near_container = RewTerm(
-                func=object_near_container, weight=0.25 / step_dt,
-                params={**params, "success_z_max": task["success_z_max"], "z_max": task["success_z_max"] + 0.09},
             )
         if table_contact_penalty:
             # optional penalty (-1/step) while any gripper link touches the table

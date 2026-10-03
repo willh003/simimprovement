@@ -26,7 +26,7 @@ steps actually run).
 | `latent_rl/rollout.py` | `RolloutBuffer` (T × N), SMDP GAE |
 | `latent_rl/networks.py` | `SteeringActor` (+ `dist`, `evaluate(feat, z)`), `ValueNet`, `TwinQ` (SAC) |
 | `latent_rl/steered_policy.py` | `build_noise` (single or batched), `SteeredPolicy` (deployment, unchanged) |
-| `latent_rl/encoders.py` | `encode_batch`; `DroidVisionEncoder.batch` (ViT in mini-batches of 64) |
+| `latent_rl/encoders.py` | `encode_batch`; `ImageEncoder` base (shared by `DroidResNet50Encoder` / `DroidVisionEncoder` = dinov2; both finetunable, mini-batches of 64) |
 | `policy/droid_jointpos_client.py` | `SimEvalsJointPosClient.build_requests` (batched), `query_chunks` (`infer_batch`, fixed sub-batches), `postprocess_actions` |
 | `policy/steered_client.py` | `ServerChunkPolicy.query_batch` (also `BatchChunkPolicy`) |
 
@@ -72,7 +72,7 @@ for it in 1..iterations:
     rollout_chunks × { z, logp, v = ppo.act(feat); t = venv.step(z); buf.add(...); per-env EpisodeStats }
     buf.compute_returns(ppo.value(feat), λ);  ppo.update(buf)
     log train/* (PPO stats + transitions_per_sec, rollout_s, update_s, env_steps, episodes)
-    log rollout/* = means over episodes that ended this iteration (+ success/*_ma over the last num_envs episodes)
+    log rollout/*_ma = rolling means (all episode metrics) over the last num_envs finished episodes, only once that window is full; + episodes_finished
     every eval_every_min minutes (checked per iteration): evaluate_vec (deterministic actor mean, 1 episode per env) → eval/fixed/*; then reset all envs
     every save_every: ckpt_<it>
 final eval (if not just done) + ckpt_final; os._exit(0) (Isaac hangs on shutdown)
@@ -130,3 +130,38 @@ runs the PPO loss on the feature leaf, then recomputes each microbatch with grad
 Separate Adam group `ppo.encoder_lr` (3e-5), separate grad clip, `ppo.encoder_microbatch` (32). BatchNorm is always eval mode. bf16
 autocast. Checkpoints add `encoder.pt`; `SteeredPolicy.from_checkpoint` loads it. Pretrained weights come from torchvision
 (`IMAGENET1K_V2`, downloaded to the torch hub cache - warm it on a node with internet).
+
+`droid_vision` (DINOv2, `--dino-backbone`) now has the same treatment as ResNet50: `--finetune-encoder` trains it end-to-end, `--no-finetune-encoder` freezes it. Both share `ImageEncoder` in `latent_rl/encoders.py`.
+
+## Critic warmup (`--critic-warmup-iters N`)
+
+The first N iterations only fit the critic, so the first policy updates see sensible advantages instead of an untrained V.
+- `DSRLPPO.update(buf, train_policy=False)`: `loss = vf_coef * v_loss` only (no pg / entropy term, no actor logp). Grad clipping
+  covers the critic params only. `zero_grad(set_to_none=True)` leaves actor grads `None`, and Adam skips grad-less params, so the actor
+  is bit-identical (including Adam state) after a warmup update. No `target_kl` early stop. Returns are still computed in the loop.
+- Rollouts use the unchanged (near N(0, I)) actor, so the data is on-policy for the critic.
+- The encoder is frozen during warmup (features detached, no `_backward_encoder`, no `enc_grad_norm`). `--warmup-train-encoder`
+  trains it with the value loss instead.
+- `--warmup-min-explained-var X`: end warmup after the first iteration whose `explained_var` exceeds X.
+- Tracked by the loop's iteration index `it <= critic_warmup_iters`. `train_steering.py` has no resume path (checkpoints are
+  save-only), so there is nothing to redo; if resume is added, start `it` from the saved iteration.
+- Logged as `train/warmup = 1` (absent otherwise); `pg_loss`, `approx_kl`, `clipfrac`, `entropy` are absent during warmup.
+- Tests: `tests/test_ppo.py::test_critic_warmup_*`.
+
+## Privileged state for the actor and critic (`--privileged`, default on)
+The pretrained pi0.5 policy only sees images/proprio, but the steering actor and the critic also get ground-truth sim state
+(`src/polaris/rl/privileged.py::SimEvalsPrivileged`, 16 floats, positions in each env's local frame):
+`[obj_pos(3), obj_quat_wxyz(4), obj_lin_vel(3), goal_pos(3), obj_pos - goal_pos(3)]`. Object and goal (= container) are the
+`object_cfg` / `container_cfg` of the success reward term, so it works for CubeBowl / CanMug / BananaBin. The base policy request is unchanged.
+- Plumbing: `VecChunkEnv(priv_fn=...)` refreshes `venv.priv` (N, 16) in `_observe` (so it always matches `venv.feat`; `VecChunkTransition.next_priv`).
+  `RolloutBuffer(priv_dim=)` stores it; `DSRLPPO(priv_dim=)` builds actor/critic with input `feat_dim + priv_dim` and
+  concatenates `[feat, priv]` after the (finetuned) encoder, so encoder gradients are unaffected. `act/value(feat, priv=)`.
+- `SteeringConfig.priv_dim` is saved in `config.json`; `load_checkpoint` sizes the actor accordingly. `SteeredPolicy.step(..., priv=)`
+  raises if the checkpoint needs priv and none is given: such checkpoints only work where the sim state is available (not real robot).
+- `--no-privileged` restores the old image+proprio-only actor/critic.
+
+## Broadcast noise (`--broadcast-noise`, default on)
+With `broadcast_noise` the actor outputs ONE noise vector (`noise_shape[1]` = 32 dims) that `build_noise` copies into every steered row
+(the first `steer_horizon`, default `open_loop_horizon`; the remaining rows stay fresh N(0, I)). `SteeringConfig.steer_dim` shrinks accordingly
+(32 instead of `steer_horizon * 32`), and the flag is saved in `config.json` (missing = False, so old checkpoints load unchanged).
+`--no-broadcast-noise`: separate noise per steered row. To broadcast over the whole 15-step noise set `--steer-horizon 15`.

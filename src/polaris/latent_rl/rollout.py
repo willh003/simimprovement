@@ -10,7 +10,7 @@ class RolloutBuffer:
     """
 
     def __init__(self, num_steps: int, num_envs: int, feat_dim: int, steer_dim: int, device="cpu",
-                 img_shape: tuple | None = None, proprio_dim: int = 8):
+                 img_shape: tuple | None = None, proprio_dim: int = 8, priv_dim: int = 0):
         """`steer_dim`: size of the actor's full action. `img_shape` (e.g. (2, 224, 224, 3)) also stores uint8 images +
         proprio per transition, for re-encoding with a finetuned encoder during the PPO update."""
         self.num_steps, self.num_envs, self.device = num_steps, num_envs, device
@@ -22,9 +22,11 @@ class RolloutBuffer:
         if img_shape is not None:
             self.d["img"] = torch.zeros(num_steps, num_envs, *img_shape, dtype=torch.uint8, device=device)
             self.d["proprio"] = z(proprio_dim)
+        if priv_dim:  # privileged state the actor/critic see in addition to feat
+            self.d["priv"] = z(priv_dim)
         self.ptr = 0
 
-    def add(self, feat, z, logp, value, reward, discount, terminated, over, truncated=None, packed=None):
+    def add(self, feat, z, logp, value, reward, discount, terminated, over, truncated=None, packed=None, priv=None):
         t = lambda x: torch.as_tensor(x, dtype=torch.float32, device=self.device)
         reward, value, discount = t(reward), t(value), t(discount)
         if truncated is not None:  # time-out without termination: bootstrap with V(s_t) in place of V(terminal)
@@ -32,6 +34,8 @@ class RolloutBuffer:
         vals = dict(feat=feat, z=z, logp=logp, value=value, reward=reward, discount=discount, over=over)
         for k, v in vals.items():
             self.d[k][self.ptr] = t(v)
+        if "priv" in self.d:
+            self.d["priv"][self.ptr] = t(priv)
         if "img" in self.d:
             self.d["img"][self.ptr] = torch.as_tensor(packed[0], dtype=torch.uint8, device=self.device)
             self.d["proprio"][self.ptr] = t(packed[1])

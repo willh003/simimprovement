@@ -82,3 +82,89 @@ def test_ppo_improves_bandit():
     after = mean_reward()
     assert after > before + 1.0 and after > -0.5, (before, after)
     assert np.isfinite(metrics["approx_kl"]) and metrics["explained_var"] == metrics["explained_var"]
+
+
+class _TinyEncoder(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.lin = torch.nn.Linear(4, 3)
+
+    def forward(self, img, proprio):
+        return self.lin(img.flatten(1).float() / 255)
+
+
+def _warmup_setup(encoder):
+    torch.manual_seed(0)
+    np.random.seed(0)
+    n, steps = 8, 4
+    ppo = DSRLPPO(3, 2, cfg=PPOConfig(epochs=2, minibatches=2), encoder=encoder)
+    buf = RolloutBuffer(steps, n, 3, 2, img_shape=(2, 2) if encoder is not None else None)
+    ones = np.ones(n)
+    for _ in range(steps):
+        feat = np.random.randn(n, 3).astype(np.float32)
+        z, logp, value = ppo.act(feat)
+        packed = (np.random.randint(0, 255, (n, 2, 2), dtype=np.uint8), np.zeros((n, 1), np.float32)) if encoder is not None else None
+        buf.add(feat, z, logp, value, np.random.randn(n), 0.9 * ones, 0 * ones, 0 * ones, 0 * ones, packed)
+    buf.compute_returns(ppo.value(feat), 0.95)
+    return ppo, buf
+
+
+def _snap(module):
+    return [p.detach().clone() for p in module.parameters()]
+
+
+def _same(a, b):
+    return all(torch.equal(x, y) for x, y in zip(a, b))
+
+
+def test_critic_warmup_only_moves_critic():
+    ppo, buf = _warmup_setup(None)
+    actor0, critic0 = _snap(ppo.actor), _snap(ppo.critic)
+    for _ in range(3):  # repeated updates: Adam state must not drift the actor either
+        m = ppo.update(buf, train_policy=False)
+    assert _same(actor0, _snap(ppo.actor))
+    assert not _same(critic0, _snap(ppo.critic))
+    assert m["warmup"] == 1 and not {"pg_loss", "approx_kl", "clipfrac", "entropy"} & m.keys() and "explained_var" in m
+    actor1 = _snap(ppo.actor)
+    m = ppo.update(buf)  # a normal update afterwards moves the actor and reports policy metrics
+    assert not _same(actor1, _snap(ppo.actor)) and "pg_loss" in m and "warmup" not in m
+
+
+@pytest.mark.parametrize("train_encoder", [False, True])
+def test_critic_warmup_encoder_frozen_by_default(train_encoder):
+    enc = _TinyEncoder()
+    ppo, buf = _warmup_setup(enc)
+    actor0, enc0, critic0 = _snap(ppo.actor), _snap(enc), _snap(ppo.critic)
+    m = ppo.update(buf, train_policy=False, warmup_train_encoder=train_encoder)
+    assert _same(actor0, _snap(ppo.actor)) and not _same(critic0, _snap(ppo.critic))
+    assert _same(enc0, _snap(enc)) == (not train_encoder)
+    assert ("enc_grad_norm" in m) == train_encoder
+
+
+@pytest.mark.parametrize("encoder", [None, _TinyEncoder])
+def test_privileged_state_reaches_actor_and_critic(encoder):
+    torch.manual_seed(0)
+    n, steps, pd = 8, 4, 5
+    ppo = DSRLPPO(3, 2, cfg=PPOConfig(epochs=2, minibatches=2, target_kl=None), encoder=encoder() if encoder else None, priv_dim=pd)
+    assert ppo.actor.trunk[0].in_features == 3 + pd and ppo.critic.v[0].in_features == 3 + pd
+    buf = RolloutBuffer(steps, n, 3, 2, img_shape=(2, 2) if encoder else None, priv_dim=pd)
+    ones = np.ones(n)
+    for _ in range(steps):
+        feat, priv = np.random.randn(n, 3).astype(np.float32), np.random.randn(n, pd).astype(np.float32)
+        z, logp, value = ppo.act(feat, priv=priv)
+        packed = (np.random.randint(0, 255, (n, 2, 2), dtype=np.uint8), np.zeros((n, 1), np.float32)) if encoder else None
+        buf.add(feat, z, logp, value, np.random.randn(n), 0.9 * ones, 0 * ones, 0 * ones, 0 * ones, packed, priv)
+    buf.compute_returns(ppo.value(feat, priv), 0.95)
+    with pytest.raises(ValueError):
+        ppo.act(feat)
+    critic0 = _snap(ppo.critic)
+    m = ppo.update(buf)
+    assert not _same(critic0, _snap(ppo.critic)) and np.isfinite(m["pg_loss"])
+
+
+def test_build_noise_broadcast():
+    z = np.arange(3, dtype=np.float32)
+    n = build_noise(z, (4, 3), 2, broadcast=True)
+    assert n.shape == (4, 3) and (n[0] == z).all() and (n[1] == z).all() and not (n[2] == z).all()
+    nb = build_noise(np.stack([z, z + 10]), (4, 3), 3, broadcast=True)
+    assert nb.shape == (2, 4, 3) and (nb[1, :3] == z + 10).all()

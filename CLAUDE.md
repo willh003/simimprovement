@@ -10,3 +10,4 @@ I have an alias in my bashrc that points isaacpy to /isaac-sim/python.sh, so in 
 
 
 If you need to run python (for quick scripts), you can use isaacpy if you are in an apptainer. If not, you should use this python: /gscratch/weirdlab/will/venvs/ogbench/bin/python (this one won't work for running isaac sim though).
+To launch training runs yourself (pi server + apptainer via slurm), see docs/claude/cluster_runs.md (scripts/cluster/run_experiment.py).
