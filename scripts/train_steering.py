@@ -109,7 +109,7 @@ def main(args: TrainArgs):
     from polaris.rl.evaluation import evaluate_vec
     from polaris.rl.privileged import MultiTaskPrivileged, SimEvalsPrivileged
     from polaris.rl.stats import EpisodeStats, MeanAccumulator, RollingMean
-    from polaris.rl.tasks import MULTITASK_TASKS, SIM_EVALS_INSTRUCTIONS, SIM_EVALS_SUCCESS_TERMS, VecSimEvalsTask, is_sim_evals
+    from polaris.rl.tasks import MULTITASK_ENVS, SIM_EVALS_INSTRUCTIONS, SIM_EVALS_SUCCESS_TERMS, VecSimEvalsTask, is_sim_evals
     from polaris.rl.vec_chunk_env import VecChunkEnv
     from polaris.rl.wandb_logger import WandbLogger
 
@@ -120,15 +120,16 @@ def main(args: TrainArgs):
 
     success_term = SIM_EVALS_SUCCESS_TERMS[args.environment]
     env, _ = make_parallel_env(args.environment, args.num_envs, args.cam_scale, success_term=success_term)
-    multitask = args.environment in ("MultiTask", "MultiTaskWalled")
+    tasks = MULTITASK_ENVS.get(args.environment)  # task names of a multitask env, else None
+    multitask = tasks is not None
     if multitask:
         from polaris.environments.simeval_droid import task_ids
 
-        if args.num_envs % len(MULTITASK_TASKS):
-            print(f"WARNING: --num-envs {args.num_envs} is not divisible by {len(MULTITASK_TASKS)}: the task split is uneven (off by one env)")
-        tid = task_ids(env.unwrapped, len(MULTITASK_TASKS)).cpu().numpy()
-        instruction = [SIM_EVALS_INSTRUCTIONS[MULTITASK_TASKS[k]] for k in tid]  # one prompt per env
-        task_envs = {name: np.flatnonzero(tid == k) for k, name in enumerate(MULTITASK_TASKS)}
+        if args.num_envs % len(tasks):
+            print(f"WARNING: --num-envs {args.num_envs} is not divisible by {len(tasks)}: the task split is uneven (off by one env)")
+        tid = task_ids(env.unwrapped, len(tasks)).cpu().numpy()
+        instruction = [SIM_EVALS_INSTRUCTIONS[tasks[k]] for k in tid]  # one prompt per env
+        task_envs = {name: np.flatnonzero(tid == k) for k, name in enumerate(tasks)}
         print(f"MultiTask: envs per task {({n: len(i) for n, i in task_envs.items()})}")
     else:
         instruction = args.instruction or SIM_EVALS_INSTRUCTIONS[args.environment]
@@ -218,7 +219,7 @@ def main(args: TrainArgs):
                     summary = ep_stats[i].summary()
                     finished.add(summary)
                     if multitask:  # per-task copies of the headline metrics, rollout/<task>/...
-                        name = MULTITASK_TASKS[tid[i]]
+                        name = tasks[tid[i]]
                         finished.add({f"{name}/{k}": summary[k] for k in ("success/all", "return", "length_steps")})
                         for k_, v_ in recent_task[name].add({"success/all": summary["success/all"]}).items():
                             task_success_ma[f"{name}/{k_}_ma"] = v_

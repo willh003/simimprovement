@@ -24,7 +24,7 @@ from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.envs import ManagerBasedRLEnv, ManagerBasedRLEnvCfg
 from isaaclab.sensors import CameraCfg, ContactSensorCfg
 
-from polaris.rl.tasks import MULTITASK_TASKS
+from polaris.rl.tasks import MULTITASK_OBJAVERSE_TASKS, MULTITASK_TASKS
 
 from polaris.rl.molmo_specs import MOLMO_SPECS
 
@@ -74,6 +74,35 @@ def ensure_multitask_scene() -> Path:
                 raise RuntimeError(f"could not copy /World/{name} from scene{scene}.usd")
     layer.Save()
     os.replace(tmp, path)  # atomic: concurrent runs never see a partial file
+    return path
+
+
+MULTI_MOLMO_SCENE = "_multi_molmo"  # dynamic_scene name of the sim-evals + objaverse Molmo combined scene (assets/simevals/scene_multi_molmo.usd)
+
+
+def ensure_multitask_molmo_scene() -> Path:
+    """Build assets/simevals/scene_multi_molmo.usd if missing: `scene_multi.usd` (table, light, the 3 sim-evals tasks' 6 objects) plus
+    the object / container rigid bodies (`/World/obj_*`, `/World/cont_*`) of every objaverse Molmo env in MULTITASK_OBJAVERSE_TASKS, copied
+    from their `molmo_*.usd` scenes (containers shared by several envs, e.g. cont_pot2, are copied once; asset references are relative to
+    the assets dir, so the file lives next to them)."""
+    path = DATA_PATH / f"scene{MULTI_MOLMO_SCENE}.usd"
+    if path.exists():
+        return path
+    tmp = DATA_PATH / f"scene{MULTI_MOLMO_SCENE}.{os.getpid()}.tmp.usd"
+    layer = Sdf.Layer.CreateNew(str(tmp))
+    layer.TransferContent(Sdf.Layer.FindOrOpen(str(ensure_multitask_scene())))
+    done = set()
+    for env_id in MULTITASK_OBJAVERSE_TASKS:
+        spec = MOLMO_SPECS[env_id]
+        src = Sdf.Layer.FindOrOpen(str(DATA_PATH / f"{spec['scene']}.usd"))
+        for name in spec["object"] + spec["container"]:
+            if name in done:
+                continue
+            if not Sdf.CopySpec(src, f"/World/{name}", layer, f"/World/{name}"):
+                raise RuntimeError(f"could not copy /World/{name} from {spec['scene']}.usd")
+            done.add(name)
+    layer.Save()
+    os.replace(tmp, path)
     return path
 
 
@@ -171,6 +200,8 @@ class SceneCfg(InteractiveSceneCfg):
     def dynamic_scene(self, scene_name: str):
         if scene_name == MULTI_SCENE:
             ensure_multitask_scene()
+        elif scene_name == MULTI_MOLMO_SCENE:
+            ensure_multitask_molmo_scene()
         environment_path = DATA_PATH / (f"{scene_name}.usd" if scene_name.startswith("molmo_") else f"scene{scene_name}.usd")
         scene = AssetBaseCfg(
                 prim_path="{ENV_REGEX_NS}/scene",
@@ -421,9 +452,17 @@ def randomize_multitask(
     every camera's view (they fall away from there; the next reset parks them again)."""
     dev = env.device
     uni = lambda rng, shape: torch.rand(shape, device=dev) * (rng[1] - rng[0]) + rng[0]
-    draw = lambda k: torch.stack([uni(x_range, (k,)), uni(y_range, (k,))], dim=-1)
     tid = task_ids(env, len(specs))[env_ids]
-    names = [n for s in specs for n in (s["obj"], s["cont"])]
+    names = list(dict.fromkeys(n for s in specs for n in (s["obj"], s["cont"])))  # containers can be shared by several tasks
+
+    def draw(name, s, idx):
+        """xy for `name` in envs `idx`: a spec with x_off / y_off (Molmo tasks) samples around the body's default xy (offsets that keep it
+        on the table, as in `randomize_pair_xy`), otherwise uniform in the workspace box."""
+        k = len(idx)
+        if "x_off" in s:
+            return assets[name].data.default_root_state[idx, :2] + torch.stack([uni(s["x_off"], (k,)), uni(s["y_off"], (k,))], dim=-1)
+        return torch.stack([uni(x_range, (k,)), uni(y_range, (k,))], dim=-1)
+
     assets = {n: env.scene[n] for n in names}
     pose = {n: assets[n].data.default_root_state[env_ids, :7].clone() for n in names}
     for j, n in enumerate(names):  # park everything, then place each task's pair in its own envs
@@ -432,18 +471,22 @@ def randomize_multitask(
         sel = (tid == k).nonzero(as_tuple=True)[0]
         if len(sel) == 0:
             continue
-        a, b = draw(len(sel)), draw(len(sel))
+        ids = env_ids[sel]
+        a, b = draw(s["obj"], s, ids), draw(s["cont"], s, ids)
         for _ in range(200):
             bad = torch.linalg.norm(a - b, dim=-1) < s["min_dist"]
             if not bad.any():
                 break
-            a[bad], b[bad] = draw(int(bad.sum())), draw(int(bad.sum()))  # resample only the overlapping envs
+            a[bad], b[bad] = draw(s["obj"], s, ids[bad]), draw(s["cont"], s, ids[bad])  # resample only the overlapping envs
         else:
             raise RuntimeError(f"could not sample object/container positions {s['min_dist']} m apart")
         for n, xy in ((s["obj"], a), (s["cont"], b)):
             default = assets[n].data.default_root_state[env_ids[sel], :7]  # keeps each object's resting height / upright orientation
             pose[n][sel, :2], pose[n][sel, 2] = xy, default[:, 2]
-            pose[n][sel, 3:7] = _yaw_times(uni((-3.14159, 3.14159), (len(sel),)), default[:, 3:7])
+            yaw = uni((-3.14159, 3.14159), (len(sel),))
+            if n == s["cont"] and not s.get("cont_yaw", True):  # Molmo containers keep their orientation (handles must stay on the table)
+                yaw = torch.zeros_like(yaw)
+            pose[n][sel, 3:7] = _yaw_times(yaw, default[:, 3:7])
     origins = env.scene.env_origins[env_ids]
     for n in names:
         assets[n].write_root_pose_to_sim(torch.cat([pose[n][:, :3] + origins, pose[n][:, 3:7]], dim=-1), env_ids=env_ids)
@@ -485,7 +528,7 @@ def multitask_in_container(env: ManagerBasedRLEnv, specs: list[dict]) -> torch.T
     tid = task_ids(env, len(specs))
     out = torch.zeros(env.num_envs, device=env.device)
     for k, s in enumerate(specs):
-        kwargs = {key: v for key, v in s.items() if key not in ("obj", "cont", "min_dist")}
+        kwargs = {key: v for key, v in s.items() if key not in ("obj", "cont", "min_dist", "x_off", "y_off", "cont_yaw")}
         r = object_in_container(env, SceneEntityCfg(s["obj"]), SceneEntityCfg(s["cont"]), **kwargs)
         out = torch.where(tid == k, r, out)
     return out
@@ -576,6 +619,8 @@ class EnvCfg(ManagerBasedRLEnvCfg):
     def _rigid_name(self, *keywords: str) -> str:
         """The single scene rigid body whose name contains one of `keywords` (error if none/ambiguous)."""
         names = [k for k, v in vars(self.scene).items() if isinstance(v, RigidObjectCfg)]
+        if not any(kw.startswith(("obj_", "cont_")) for kw in keywords):  # generated Molmo bodies (e.g. cont_mug2) never match sim-evals keywords
+            names = [n for n in names if not n.startswith(("obj_", "cont_"))]
         hits = [n for n in names if any(kw in n.lower() for kw in keywords)]
         if len(hits) != 1:
             raise ValueError(
@@ -724,12 +769,20 @@ class MultiTaskEnvCfg(EnvCfg):
     i % 3; at every reset its object and container go to random places in the workspace and the other tasks' objects are
     parked out of view (`randomize_multitask`). One success term `obj_in_container` dispatches on the env's task."""
 
+    multitask_scene: str = MULTI_SCENE
+    multitask_tasks: tuple = tuple(MULTITASK_TASKS)
+
     def __post_init__(self):
         super().__post_init__()
-        self.scene.dynamic_scene(MULTI_SCENE)
+        self.scene.dynamic_scene(self.multitask_scene)
         self.rewards = RewardsCfg()
         specs = []
-        for name in MULTITASK_TASKS:
+        for name in self.multitask_tasks:
+            if name in MOLMO_SPECS:  # generated Molmo env: bodies named in its sidecar, thresholds / success height / reset offsets from it
+                m = MOLMO_SPECS[name]
+                specs.append(dict(obj=m["object"][0], cont=m["container"][0], **m["thresholds"], z_max=m["success_z_max"],
+                                  min_dist=m["min_dist"], x_off=tuple(m["x_range"]), y_off=tuple(m["y_range"]), cont_yaw=False))
+                continue
             t = MULTITASK_SPECS[name]
             specs.append(dict(obj=self._rigid_name(*t["object"]), cont=self._rigid_name(*t["container"]), **t["thresholds"],
                               z_max=t["success_z_max"], min_dist=t["min_dist"]))
@@ -742,6 +795,22 @@ class MultiTaskEnvCfg(EnvCfg):
 class MultiTaskWalledEnvCfg(MultiTaskEnvCfg):
     """MultiTask with each env boxed in by walls (walls v2 defaults)."""
 
+    def __post_init__(self):
+        super().__post_init__()
+        self.scene.add_walls()
+
+
+@configclass
+class MultiTaskObjaverseEnvCfg(MultiTaskEnvCfg):
+    """MultiTask over CubeBowl + CanMug + BananaBin + the objaverse Molmo envs (`MULTITASK_OBJAVERSE_TASKS`), 11 tasks in one scene
+    (`ensure_multitask_molmo_scene`). Same sparse `obj_in_container` success; Molmo tasks reset like their single-task envs."""
+
+    multitask_scene: str = MULTI_MOLMO_SCENE
+    multitask_tasks: tuple = tuple(MULTITASK_TASKS) + tuple(MULTITASK_OBJAVERSE_TASKS)
+
+
+@configclass
+class MultiTaskObjaverseWalledEnvCfg(MultiTaskObjaverseEnvCfg):
     def __post_init__(self):
         super().__post_init__()
         self.scene.add_walls()

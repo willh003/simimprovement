@@ -3,6 +3,7 @@
 No Isaac imports, so these are testable with fake envs.
 """
 
+import re
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -19,6 +20,8 @@ SIM_EVALS_INSTRUCTIONS = {
     "CanMugWalled": "put the can in the mug",
     "BananaBinWalled": "put banana in the bin",
     "MultiTaskWalled": None,  # as MultiTask, walled
+    "MultiTaskObjaverse": None,  # 11 tasks (MULTITASK_ENVS), per-env instruction
+    "MultiTaskObjaverseWalled": None,
 }
 MULTITASK_TASKS = ["CubeBowl", "CanMug", "BananaBin"]  # env i runs task i % 3, so num_envs divisible by 3 splits them evenly
 SIM_EVALS_SUCCESS_TERMS = {  # reward term that defines success
@@ -31,8 +34,16 @@ SIM_EVALS_SUCCESS_TERMS = {  # reward term that defines success
     "CanMugWalled": "can_in_mug",
     "BananaBinWalled": "obj_in_container",
     "MultiTaskWalled": "obj_in_container",
+    "MultiTaskObjaverse": "obj_in_container",
+    "MultiTaskObjaverseWalled": "obj_in_container",
 }
 
+# the objaverse Molmo envs (manifest keys with suffix 2: object and container, e.g. Molmo-pen2-mug2)
+MULTITASK_OBJAVERSE_TASKS = sorted(i for i in MOLMO_SPECS if re.fullmatch(r"Molmo-\w+2-\w+2", i))
+MULTITASK_ENVS = {  # multitask env id -> its tasks (env i runs task i % len(tasks)), see simevals_env.md
+    "MultiTask": MULTITASK_TASKS, "MultiTaskWalled": MULTITASK_TASKS,
+    "MultiTaskObjaverse": MULTITASK_TASKS + MULTITASK_OBJAVERSE_TASKS, "MultiTaskObjaverseWalled": MULTITASK_TASKS + MULTITASK_OBJAVERSE_TASKS,
+}
 for _id, _spec in MOLMO_SPECS.items():  # generated MolmoSpaces envs (docs/claude/molmo_envs.md)
     SIM_EVALS_INSTRUCTIONS[_id] = _spec["instruction"]
     SIM_EVALS_SUCCESS_TERMS[_id] = "obj_in_container"

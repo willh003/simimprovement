@@ -58,3 +58,14 @@ Rigid bodies in the scene USDs: scene 1 `rubiks_cube`, `_24_bowl`; scene 2 `_10_
 
 ## MolmoSpaces pick-and-place envs
 `Molmo-<obj>-<cont>` envs generated from MolmoSpaces assets, see `molmo_envs.md`.
+
+`environment=MultiTaskWalled` = MultiTask + `add_walls()` (walls v2 defaults, see `walled_envs.md`). Launched as `mtwall1`: `--num-envs 129 --cam-scale 0.5 --critic-warmup-iters 5 --rollout-chunks 32 --residual-scale 0.1` (129 for an even 43/43/43 task split). Not smoke-tested before launch.
+
+## MultiTaskObjaverse (11 tasks: CubeBowl, CanMug, BananaBin + the 8 objaverse Molmo envs)
+`environment=MultiTaskObjaverse` (`MultiTaskObjaverseWalled` adds `add_walls()`); tasks = `MULTITASK_ENVS[env]` in `rl/tasks.py` (`MULTITASK_OBJAVERSE_TASKS` = `Molmo-*2-*2` ids, sorted: bottle2-pot2, candle2-pan2, carrot2-pot2, pen2-mug2, pen2-pot2, potato2-pot2, spatula2-pan2, tomato2-pan2). Env i runs task i % 11, so use `--num-envs` divisible by 11 (e.g. 132).
+- Scene: `ensure_multitask_molmo_scene()` builds `assets/simevals/scene_multi_molmo.usd` on first use (gitignored): `scene_multi.usd` + the `/World/obj_*` / `/World/cont_*` bodies of the Molmo scenes (copied with `Sdf.CopySpec`; shared containers pot2 / pan2 copied once, pen2 shared by mug2 and pot2). 7 objaverse objects + 3 containers + 6 sim-evals bodies = 16 rigid bodies, all parked except each env's pair.
+- Reward/success: same sparse `obj_in_container` (`multitask_in_container`), per task the thresholds / `success_z_max` of its sidecar json (`molmo_*.json`) or `MULTITASK_SPECS`.
+- Resets: sim-evals tasks as MultiTask (workspace box, random yaw of both). Molmo tasks like their single-task env: default xy + the json's `x_range` / `y_range` offsets, `min_dist` from the json, random object yaw, container orientation fixed (`x_off` / `y_off` / `cont_yaw` keys of the spec in `randomize_multitask`).
+- `_rigid_name` ignores `obj_*` / `cont_*` bodies for sim-evals keywords (`cont_mug2` vs `_25_mug`).
+- **Status: written but NOT run** (no pxr / GPU on the login node): scene build, rigid-body discovery and reset not yet verified. Smoke test: `scripts/cluster/run_experiment.py moa-smoke --time 1 -- --environment MultiTaskObjaverse --num-envs 22 --iterations 2 --no-eval-at-start --wandb-mode disabled`.
+- Launch: `... -- --environment MultiTaskObjaverse --num-envs 132 --cam-scale 0.5 --critic-warmup-iters 5 --rollout-chunks 32 --residual-scale 0.01` (residual scale as you choose).
