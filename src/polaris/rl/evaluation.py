@@ -29,11 +29,11 @@ def evaluate(chunk_env: ChunkEnv, conditions: list[dict], n_videos: int = 0) -> 
     return metrics, videos
 
 
-def evaluate_vec(venv, act_fn, n_videos: int = 0) -> tuple[dict[str, float], list[list[np.ndarray]]]:
+def evaluate_vec(venv, act_fn, n_videos: int = 0, groups: dict[str, np.ndarray] | None = None) -> tuple[dict[str, float], list[list[np.ndarray]]]:
     """Run one episode in every env of a VecChunkEnv (envs that finish early keep stepping but are ignored).
 
     `act_fn(feat (N, F)) -> z (N, steer_dim)`. Records the first `n_videos` envs. Returns mean episode metrics over
-    all N episodes and the videos.
+    all N episodes and the videos. `groups` {name: env indices} (e.g. the envs of each task) adds `<name>/<metric>` means.
     """
     feat = venv.reset()
     n = venv.num_envs
@@ -53,4 +53,6 @@ def evaluate_vec(venv, act_fn, n_videos: int = 0) -> tuple[dict[str, float], lis
     summaries = [s.summary() for s in stats]
     metrics = {k: float(np.mean([s[k] for s in summaries])) for k in summaries[0]}
     metrics["episodes"] = n
+    for name, ids in (groups or {}).items():
+        metrics.update({f"{name}/{k}": float(np.mean([summaries[i][k] for i in ids])) for k in ("success/all", "return", "length_steps")})
     return metrics, videos

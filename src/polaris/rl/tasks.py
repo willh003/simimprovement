@@ -7,16 +7,35 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from polaris.rl.molmo_specs import MOLMO_SPECS
+
 SIM_EVALS_INSTRUCTIONS = {
     "CubeBowl": "put the cube in the bowl",
+    "CubeBowlRandom": "put the cube in the bowl",
     "CanMug": "put the can in the mug",
     "BananaBin": "put banana in the bin",
+    "MultiTask": None,  # per env: the instruction of its task (MULTITASK_TASKS)
+    "CubeBowlWalled": "put the cube in the bowl",  # same scenes with a box of walls around each env
+    "CanMugWalled": "put the can in the mug",
+    "BananaBinWalled": "put banana in the bin",
+    "MultiTaskWalled": None,  # as MultiTask, walled
 }
+MULTITASK_TASKS = ["CubeBowl", "CanMug", "BananaBin"]  # env i runs task i % 3, so num_envs divisible by 3 splits them evenly
 SIM_EVALS_SUCCESS_TERMS = {  # reward term that defines success
     "CubeBowl": "obj_in_container",
+    "CubeBowlRandom": "obj_in_container",
     "CanMug": "can_in_mug",
     "BananaBin": "obj_in_container",
+    "MultiTask": "obj_in_container",  # one term that dispatches on each env's task
+    "CubeBowlWalled": "obj_in_container",
+    "CanMugWalled": "can_in_mug",
+    "BananaBinWalled": "obj_in_container",
+    "MultiTaskWalled": "obj_in_container",
 }
+
+for _id, _spec in MOLMO_SPECS.items():  # generated MolmoSpaces envs (docs/claude/molmo_envs.md)
+    SIM_EVALS_INSTRUCTIONS[_id] = _spec["instruction"]
+    SIM_EVALS_SUCCESS_TERMS[_id] = "obj_in_container"
 
 
 def is_sim_evals(env_id: str) -> bool:

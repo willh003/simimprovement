@@ -1,3 +1,4 @@
+import os
 import torch
 import isaaclab.sim as sim_utils
 import isaaclab.envs.mdp as mdp
@@ -5,7 +6,7 @@ import numpy as np
 
 from typing import List
 from pathlib import Path
-from pxr import Usd, UsdPhysics
+from pxr import Sdf, Usd, UsdPhysics
 
 from isaaclab.envs.mdp.actions.actions_cfg import BinaryJointPositionActionCfg
 from isaaclab.envs.mdp.actions.binary_joint_actions import BinaryJointPositionAction
@@ -23,6 +24,10 @@ from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.envs import ManagerBasedRLEnv, ManagerBasedRLEnvCfg
 from isaaclab.sensors import CameraCfg, ContactSensorCfg
 
+from polaris.rl.tasks import MULTITASK_TASKS
+
+from polaris.rl.molmo_specs import MOLMO_SPECS
+
 from .simeval_robot import ASSET_PATH, NVIDIA_DROID
 
 DATA_PATH = ASSET_PATH
@@ -34,6 +39,42 @@ SCENE_TASKS = {
     # the "bin" is the rigid body small_KLT_visual_collision; its origin sits above the floor, so z_min < 0
     "3": dict(object=("banana",), container=("klt",), thresholds=dict(xy_threshold=0.08, z_min=-0.08), success_z_max=0.1),  # put banana in the bin
 }
+for _spec in MOLMO_SPECS.values():  # generated MolmoSpaces scenes, keyed by scene name (docs/claude/molmo_envs.md)
+    SCENE_TASKS[_spec["scene"]] = dict(object=tuple(_spec["object"]), container=tuple(_spec["container"]),
+                                       thresholds=_spec["thresholds"], success_z_max=_spec["success_z_max"])
+
+MULTI_SCENE = "_multi"  # dynamic_scene name of the combined multitask scene (assets/simevals/scene_multi.usd)
+# MultiTask: per task, rigid-body name keywords + object_in_container thresholds (same values as the single-task envs) and the
+# minimum xy distance between object and container centres at reset (object / container footprints + margin)
+MULTITASK_SPECS = {
+    "CubeBowl": dict(object=("rubiks_cube",), container=("bowl",), thresholds=SCENE_TASKS["1"]["thresholds"],
+                     success_z_max=SCENE_TASKS["1"]["success_z_max"], min_dist=0.16),
+    "CanMug": dict(object=("potted_meat",), container=("mug",), thresholds={}, success_z_max=0.06, min_dist=0.16),  # defaults of set_scene("2")
+    "BananaBin": dict(object=("banana",), container=("klt",), thresholds=SCENE_TASKS["3"]["thresholds"],
+                      success_z_max=SCENE_TASKS["3"]["success_z_max"], min_dist=0.30),
+}
+# prims copied from sim-evals scenes 2 and 3 into the combined scene (scene 1 = table, light, cube, bowl is the base)
+MULTI_EXTRA_PRIMS = {"2": ["_25_mug", "_10_potted_meat_can"], "3": ["_11_banana", "small_KLT_visual_collision"]}
+
+
+def ensure_multitask_scene() -> Path:
+    """Build assets/simevals/scene_multi.usd if missing: scene 1 (table, light, cube, bowl) plus the mug and can of scene 2
+    and the banana and bin of scene 3, copied prim-spec by prim-spec so their physics / collision overrides are kept.
+    Written next to the sources because the specs hold relative asset paths."""
+    path = DATA_PATH / f"scene{MULTI_SCENE}.usd"
+    if path.exists():
+        return path
+    tmp = DATA_PATH / f"scene{MULTI_SCENE}.{os.getpid()}.tmp.usd"
+    layer = Sdf.Layer.CreateNew(str(tmp))
+    layer.TransferContent(Sdf.Layer.FindOrOpen(str(DATA_PATH / "scene1.usd")))
+    for scene, names in MULTI_EXTRA_PRIMS.items():
+        src = Sdf.Layer.FindOrOpen(str(DATA_PATH / f"scene{scene}.usd"))
+        for name in names:
+            if not Sdf.CopySpec(src, f"/World/{name}", layer, f"/World/{name}"):
+                raise RuntimeError(f"could not copy /World/{name} from scene{scene}.usd")
+    layer.Save()
+    os.replace(tmp, path)  # atomic: concurrent runs never see a partial file
+    return path
 
 
 @configclass
@@ -96,8 +137,41 @@ class SceneCfg(InteractiveSceneCfg):
         ),
     )
 
+    def add_walls(self, x=(-0.8, 0.9), y=(-0.62, 0.62), z=(-0.5, 1.4), thickness=0.05, color=(0.12, 0.12, 0.12),
+                  light_intensity=60000.0, emissive=(0.0, 0.0, 0.0), left_wall=True):
+        """Enclose each env (robot, table and both external cameras) in a visual-only box room (4 walls, open top) so a
+        camera cannot see the neighbouring envs. Bounds are env-local metres (robot base at the origin, table x 0.2-0.9,
+        y -0.48-0.52, external cams at y=+-0.57); the walls' inner faces lie on the bounds. The front wall touches the
+        table's front edge, the side walls sit just behind the external cams (~0.1 m from the table), the back wall is behind the robot. `left_wall=False` drops the +y wall
+        (right behind external_cam; fuzzy in that cam, but the v2 setup with it performed best, see docs/claude/walled_envs.md)."""
+        (x0, x1), (y0, y1), (z0, z1) = x, y, z
+        cx, cy, cz, lx, ly, lz = (x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2, x1 - x0, y1 - y0, z1 - z0
+        t = thickness
+        walls = {  # name: (centre, size)
+            "wall_front": ((x1 + t / 2, cy, cz), (t, ly + 2 * t, lz)),
+            "wall_back": ((x0 - t / 2, cy, cz), (t, ly + 2 * t, lz)),
+            **({"wall_left": ((cx, y1 + t / 2, cz), (lx, t, lz))} if left_wall else {}),
+            "wall_right": ((cx, y0 - t / 2, cz), (lx, t, lz)),
+        }
+        # the walls block the shared dome light, so each room gets its own light above the table (else the table renders black)
+        self.room_light = AssetBaseCfg(
+            prim_path="{ENV_REGEX_NS}/room_light",
+            spawn=sim_utils.SphereLightCfg(intensity=light_intensity, radius=0.3),
+            init_state=AssetBaseCfg.InitialStateCfg(pos=(0.5, 0.0, 1.2)),
+        )
+        for name, (pos, size) in walls.items():
+            setattr(self, name, AssetBaseCfg(
+                prim_path=f"{{ENV_REGEX_NS}}/{name}",
+                spawn=sim_utils.CuboidCfg(
+                    size=size, visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=color, emissive_color=emissive, roughness=0.9)
+                ),
+                init_state=AssetBaseCfg.InitialStateCfg(pos=pos),
+            ))
+
     def dynamic_scene(self, scene_name: str):
-        environment_path = DATA_PATH / f"scene{scene_name}.usd"
+        if scene_name == MULTI_SCENE:
+            ensure_multitask_scene()
+        environment_path = DATA_PATH / (f"{scene_name}.usd" if scene_name.startswith("molmo_") else f"scene{scene_name}.usd")
         scene = AssetBaseCfg(
                 prim_path="{ENV_REGEX_NS}/scene",
                 spawn = sim_utils.UsdFileCfg(
@@ -266,6 +340,116 @@ class EventCfg:
     """Configuration for events."""
     reset_all = EventTerm(func=mdp.reset_scene_to_default, mode="reset")
 
+def randomize_pair_xy(
+    env: ManagerBasedRLEnv,
+    env_ids: torch.Tensor,
+    object_cfg: SceneEntityCfg,
+    container_cfg: SceneEntityCfg,
+    x_range: tuple[float, float] = (-0.15, 0.15),
+    y_range: tuple[float, float] = (-0.2, 0.2),
+    yaw_range: tuple[float, float] = (-3.14159, 3.14159),
+    min_dist: float = 0.15,
+):
+    """Reset object and container to their default pose plus a uniform random xy offset (and a random object yaw).
+
+    Offsets are resampled until the two are at least `min_dist` apart (xy), so they never overlap.
+    """
+    n = len(env_ids)
+    dev = env.device
+
+    def uni(rng, shape):
+        return torch.rand(shape, device=dev) * (rng[1] - rng[0]) + rng[0]
+
+    obj, cont = env.scene[object_cfg.name], env.scene[container_cfg.name]
+    obj_state = obj.data.default_root_state[env_ids].clone()
+    cont_state = cont.data.default_root_state[env_ids].clone()
+    d_obj = torch.stack([uni(x_range, (n,)), uni(y_range, (n,))], dim=-1)
+    d_cont = torch.stack([uni(x_range, (n,)), uni(y_range, (n,))], dim=-1)
+    for _ in range(100):
+        dist = torch.linalg.norm((obj_state[:, :2] + d_obj) - (cont_state[:, :2] + d_cont), dim=-1)
+        bad = dist < min_dist
+        if not bad.any():
+            break
+        k = int(bad.sum())  # resample only the overlapping envs
+        d_obj[bad] = torch.stack([uni(x_range, (k,)), uni(y_range, (k,))], dim=-1)
+        d_cont[bad] = torch.stack([uni(x_range, (k,)), uni(y_range, (k,))], dim=-1)
+    else:
+        raise RuntimeError("could not sample non-overlapping object/container offsets")
+    origins = env.scene.env_origins[env_ids]
+    obj_state[:, :2] += d_obj
+    cont_state[:, :2] += d_cont
+    yaw = uni(yaw_range, (n,))
+    dq = torch.stack([torch.cos(yaw / 2), torch.zeros_like(yaw), torch.zeros_like(yaw), torch.sin(yaw / 2)], dim=-1)
+    q = obj_state[:, 3:7]  # (w, x, y, z); apply the yaw about world z
+    w1, x1, y1, z1 = dq.unbind(-1)
+    w2, x2, y2, z2 = q.unbind(-1)
+    obj_state[:, 3:7] = torch.stack(
+        [w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2, w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+         w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2, w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2], dim=-1)
+    for asset, state in ((obj, obj_state), (cont, cont_state)):
+        asset.write_root_pose_to_sim(torch.cat([state[:, :3] + origins, state[:, 3:7]], dim=-1), env_ids=env_ids)
+        asset.write_root_velocity_to_sim(torch.zeros_like(state[:, 7:13]), env_ids=env_ids)
+
+
+def task_ids(env, num_tasks: int = len(MULTITASK_TASKS)) -> torch.Tensor:
+    """(num_envs,) task index of each env of the MultiTask env: env i runs task i % num_tasks (an even split when divisible)."""
+    ids = getattr(env, "_multitask_ids", None)
+    if ids is None:
+        ids = env._multitask_ids = torch.arange(env.num_envs, device=env.device) % num_tasks
+    return ids
+
+
+def _yaw_times(yaw: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
+    """Quaternions (w, x, y, z): rotation by `yaw` about world z applied after `q`."""
+    w1, x1, y1, z1 = torch.cos(yaw / 2), torch.zeros_like(yaw), torch.zeros_like(yaw), torch.sin(yaw / 2)
+    w2, x2, y2, z2 = q.unbind(-1)
+    return torch.stack(
+        [w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2, w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+         w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2, w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2], dim=-1)
+
+
+def randomize_multitask(
+    env: ManagerBasedRLEnv,
+    env_ids: torch.Tensor,
+    specs: list[dict],
+    x_range: tuple[float, float] = (0.30, 0.62),
+    y_range: tuple[float, float] = (-0.30, 0.30),
+    park: tuple[float, float, float] = (-2.0, -1.0, -5.0),
+):
+    """MultiTask reset: each env's task object and container get uniform random xy anywhere in the workspace box (env-local
+    metres) and random yaw, at least `spec["min_dist"]` apart. The other tasks' objects are parked far below and behind the robot, out of
+    every camera's view (they fall away from there; the next reset parks them again)."""
+    dev = env.device
+    uni = lambda rng, shape: torch.rand(shape, device=dev) * (rng[1] - rng[0]) + rng[0]
+    draw = lambda k: torch.stack([uni(x_range, (k,)), uni(y_range, (k,))], dim=-1)
+    tid = task_ids(env, len(specs))[env_ids]
+    names = [n for s in specs for n in (s["obj"], s["cont"])]
+    assets = {n: env.scene[n] for n in names}
+    pose = {n: assets[n].data.default_root_state[env_ids, :7].clone() for n in names}
+    for j, n in enumerate(names):  # park everything, then place each task's pair in its own envs
+        pose[n][:, :3] = torch.tensor([park[0], park[1] + 0.4 * j, park[2]], device=dev)
+    for k, s in enumerate(specs):
+        sel = (tid == k).nonzero(as_tuple=True)[0]
+        if len(sel) == 0:
+            continue
+        a, b = draw(len(sel)), draw(len(sel))
+        for _ in range(200):
+            bad = torch.linalg.norm(a - b, dim=-1) < s["min_dist"]
+            if not bad.any():
+                break
+            a[bad], b[bad] = draw(int(bad.sum())), draw(int(bad.sum()))  # resample only the overlapping envs
+        else:
+            raise RuntimeError(f"could not sample object/container positions {s['min_dist']} m apart")
+        for n, xy in ((s["obj"], a), (s["cont"], b)):
+            default = assets[n].data.default_root_state[env_ids[sel], :7]  # keeps each object's resting height / upright orientation
+            pose[n][sel, :2], pose[n][sel, 2] = xy, default[:, 2]
+            pose[n][sel, 3:7] = _yaw_times(uni((-3.14159, 3.14159), (len(sel),)), default[:, 3:7])
+    origins = env.scene.env_origins[env_ids]
+    for n in names:
+        assets[n].write_root_pose_to_sim(torch.cat([pose[n][:, :3] + origins, pose[n][:, 3:7]], dim=-1), env_ids=env_ids)
+        assets[n].write_root_velocity_to_sim(torch.zeros(len(env_ids), 6, device=dev), env_ids=env_ids)
+
+
 @configclass
 class CommandsCfg:
     """Command terms for the MDP."""
@@ -294,6 +478,17 @@ def object_in_container(
     z_ok = (rel[:, 2] > z_min) & (rel[:, 2] < z_max)
     still = torch.linalg.norm(obj.data.root_lin_vel_w, dim=-1) < max_speed
     return (xy_ok & z_ok & still).float()
+
+
+def multitask_in_container(env: ManagerBasedRLEnv, specs: list[dict]) -> torch.Tensor:
+    """`object_in_container` of each env's own task: `specs[k]` = dict(obj, cont, z_max, <thresholds>) for task k (see `task_ids`)."""
+    tid = task_ids(env, len(specs))
+    out = torch.zeros(env.num_envs, device=env.device)
+    for k, s in enumerate(specs):
+        kwargs = {key: v for key, v in s.items() if key not in ("obj", "cont", "min_dist")}
+        r = object_in_container(env, SceneEntityCfg(s["obj"]), SceneEntityCfg(s["cont"]), **kwargs)
+        out = torch.where(tid == k, r, out)
+    return out
 
 
 def object_near_container(
@@ -452,3 +647,101 @@ class BananaBinEnvCfg(EnvCfg):
     def __post_init__(self):
         super().__post_init__()
         self.set_scene("3")
+
+
+
+@configclass
+class MolmoEnvCfg(EnvCfg):
+    """Generated MolmoSpaces pick-and-place scene (`scene` = scene name of the sidecar spec). Reset randomizes object /
+    container xy like CubeBowlRandom, with the spec's min_dist."""
+
+    scene_name: str = ""
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.set_scene(self.scene_name)
+        task = SCENE_TASKS[self.scene_name]
+        self.events.randomize_poses = EventTerm(
+            func=randomize_pair_xy,
+            mode="reset",
+            params={
+                "object_cfg": SceneEntityCfg(self._rigid_name(*task["object"])),
+                "container_cfg": SceneEntityCfg(self._rigid_name(*task["container"])),
+                "min_dist": MOLMO_SPECS_BY_SCENE[self.scene_name]["min_dist"],
+                "x_range": tuple(MOLMO_SPECS_BY_SCENE[self.scene_name]["x_range"]),
+                "y_range": tuple(MOLMO_SPECS_BY_SCENE[self.scene_name]["y_range"]),
+            },
+        )
+
+
+MOLMO_SPECS_BY_SCENE = {s["scene"]: s for s in MOLMO_SPECS.values()}
+
+
+@configclass
+class CubeBowlWalledEnvCfg(CubeBowlEnvCfg):
+    """CubeBowl with each env boxed in by walls (no view of the other envs)."""
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.scene.add_walls()
+
+
+@configclass
+class CanMugWalledEnvCfg(CanMugEnvCfg):
+    def __post_init__(self):
+        super().__post_init__()
+        self.scene.add_walls()
+
+
+@configclass
+class BananaBinWalledEnvCfg(BananaBinEnvCfg):
+    def __post_init__(self):
+        super().__post_init__()
+        self.scene.add_walls()
+
+
+@configclass
+class CubeBowlRandomEnvCfg(EnvCfg):
+    """CubeBowl with broad resets: cube and bowl each get a random xy offset (and cube yaw) from the default layout."""
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.set_scene("1")
+        task = SCENE_TASKS["1"]
+        self.events.randomize_poses = EventTerm(
+            func=randomize_pair_xy,
+            mode="reset",
+            params={
+                "object_cfg": SceneEntityCfg(self._rigid_name(*task["object"])),
+                "container_cfg": SceneEntityCfg(self._rigid_name(*task["container"])),
+            },
+        )
+
+
+@configclass
+class MultiTaskEnvCfg(EnvCfg):
+    """CubeBowl + CanMug + BananaBin in one scene (the CubeBowl table / light, all six objects present). Env i runs task
+    i % 3; at every reset its object and container go to random places in the workspace and the other tasks' objects are
+    parked out of view (`randomize_multitask`). One success term `obj_in_container` dispatches on the env's task."""
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.scene.dynamic_scene(MULTI_SCENE)
+        self.rewards = RewardsCfg()
+        specs = []
+        for name in MULTITASK_TASKS:
+            t = MULTITASK_SPECS[name]
+            specs.append(dict(obj=self._rigid_name(*t["object"]), cont=self._rigid_name(*t["container"]), **t["thresholds"],
+                              z_max=t["success_z_max"], min_dist=t["min_dist"]))
+        step_dt = self.sim.dt * self.decimation
+        self.rewards.obj_in_container = RewTerm(func=multitask_in_container, weight=1.0 / step_dt, params={"specs": specs})
+        self.events.randomize_poses = EventTerm(func=randomize_multitask, mode="reset", params={"specs": specs})
+
+
+@configclass
+class MultiTaskWalledEnvCfg(MultiTaskEnvCfg):
+    """MultiTask with each env boxed in by walls (walls v2 defaults)."""
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.scene.add_walls()

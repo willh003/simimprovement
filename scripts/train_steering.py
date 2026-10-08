@@ -27,7 +27,7 @@ from polaris.latent_rl.algos import PPOConfig
 
 @dataclass
 class TrainArgs:
-    environment: str  # sim-evals task: CubeBowl | CanMug | BananaBin
+    environment: str  # sim-evals task: CubeBowl | CanMug | BananaBin | MultiTask (all three at once, envs split evenly)
     policy: PolicyArgs
     num_envs: int = 128
     cam_scale: float = 0.5  # camera resolution multiplier (0.5 = 640x360; 0.25 hurts the base policy, see server_and_resolution_bench.md)
@@ -107,9 +107,9 @@ def main(args: TrainArgs):
     from polaris.policy.droid_jointpos_client import SimEvalsJointPosClient
     from polaris.policy.steered_client import ServerChunkPolicy
     from polaris.rl.evaluation import evaluate_vec
-    from polaris.rl.privileged import SimEvalsPrivileged
+    from polaris.rl.privileged import MultiTaskPrivileged, SimEvalsPrivileged
     from polaris.rl.stats import EpisodeStats, MeanAccumulator, RollingMean
-    from polaris.rl.tasks import SIM_EVALS_INSTRUCTIONS, SIM_EVALS_SUCCESS_TERMS, VecSimEvalsTask, is_sim_evals
+    from polaris.rl.tasks import MULTITASK_TASKS, SIM_EVALS_INSTRUCTIONS, SIM_EVALS_SUCCESS_TERMS, VecSimEvalsTask, is_sim_evals
     from polaris.rl.vec_chunk_env import VecChunkEnv
     from polaris.rl.wandb_logger import WandbLogger
 
@@ -120,7 +120,19 @@ def main(args: TrainArgs):
 
     success_term = SIM_EVALS_SUCCESS_TERMS[args.environment]
     env, _ = make_parallel_env(args.environment, args.num_envs, args.cam_scale, success_term=success_term)
-    instruction = args.instruction or SIM_EVALS_INSTRUCTIONS[args.environment]
+    multitask = args.environment in ("MultiTask", "MultiTaskWalled")
+    if multitask:
+        from polaris.environments.simeval_droid import task_ids
+
+        if args.num_envs % len(MULTITASK_TASKS):
+            print(f"WARNING: --num-envs {args.num_envs} is not divisible by {len(MULTITASK_TASKS)}: the task split is uneven (off by one env)")
+        tid = task_ids(env.unwrapped, len(MULTITASK_TASKS)).cpu().numpy()
+        instruction = [SIM_EVALS_INSTRUCTIONS[MULTITASK_TASKS[k]] for k in tid]  # one prompt per env
+        task_envs = {name: np.flatnonzero(tid == k) for k, name in enumerate(MULTITASK_TASKS)}
+        print(f"MultiTask: envs per task {({n: len(i) for n, i in task_envs.items()})}")
+    else:
+        instruction = args.instruction or SIM_EVALS_INSTRUCTIONS[args.environment]
+        tid, task_envs = None, None
 
     if args.dummy_policy:
         client = SimEvalsJointPosClient.__new__(SimEvalsJointPosClient)  # request building only, no server connection
@@ -129,7 +141,7 @@ def main(args: TrainArgs):
     else:
         client = SimEvalsJointPosClient(args.policy)
         base = ServerChunkPolicy(client, args.noise_shape, args.server_batch_size)
-    priv_fn = SimEvalsPrivileged(env, success_term) if args.privileged else None
+    priv_fn = (MultiTaskPrivileged if multitask else SimEvalsPrivileged)(env, success_term) if args.privileged else None
     image_encoder = args.encoder in ("droid_resnet50", "droid_vision")
     finetune = args.finetune_encoder and image_encoder
     encoder_kwargs = {"finetune": finetune} if image_encoder else {}
@@ -162,7 +174,7 @@ def main(args: TrainArgs):
 
     def run_eval(step: int):
         t0 = time.perf_counter()
-        metrics, videos = evaluate_vec(venv, lambda f: ppo.act(f, deterministic=True, priv=venv.priv)[0], args.eval_videos)
+        metrics, videos = evaluate_vec(venv, lambda f: ppo.act(f, deterministic=True, priv=venv.priv)[0], args.eval_videos, task_envs)
         metrics["time_s"] = time.perf_counter() - t0
         logger.log(metrics, step, prefix="eval/fixed/")
         for i, frames in enumerate(videos):
@@ -172,6 +184,7 @@ def main(args: TrainArgs):
     transitions = env_steps = episodes = 0
     evaled_at_it = -1
     recent = RollingMean(window=args.num_envs)
+    recent_task = {n: RollingMean(window=len(i)) for n, i in task_envs.items()} if multitask else {}
     warmup_iters = args.critic_warmup_iters  # counted by the iteration index (there is no resume path in this script)
     if args.eval_at_start:
         run_eval(0)
@@ -181,7 +194,7 @@ def main(args: TrainArgs):
     for it in range(1, args.iterations + 1):
         t0 = time.perf_counter()
         buf.reset()
-        finished, n_finished, success_ma = MeanAccumulator(), 0, {}
+        finished, n_finished, success_ma, task_success_ma = MeanAccumulator(), 0, {}, {}
         bad_log = []  # (chunk, field, env ids): non-finite / out-of-range rollout data, skips this iteration's update
         for _ in range(args.rollout_chunks):
             z, logp, value = ppo.act(feat, priv=venv.priv)
@@ -204,6 +217,11 @@ def main(args: TrainArgs):
                 if t.episode_over[i]:
                     summary = ep_stats[i].summary()
                     finished.add(summary)
+                    if multitask:  # per-task copies of the headline metrics, rollout/<task>/...
+                        name = MULTITASK_TASKS[tid[i]]
+                        finished.add({f"{name}/{k}": summary[k] for k in ("success/all", "return", "length_steps")})
+                        for k_, v_ in recent_task[name].add({"success/all": summary["success/all"]}).items():
+                            task_success_ma[f"{name}/{k_}_ma"] = v_
                     n_finished += 1
                     success_ma = recent.add({k: v for k, v in summary.items() if k.startswith("success/")})
                     ep_stats[i].reset()
@@ -241,7 +259,7 @@ def main(args: TrainArgs):
         logger.log({**train_metrics, **perf}, transitions, prefix="train/")
         if n_finished:  # means over the episodes that ended during this iteration
             ep_metrics = {**finished.pop_means(), "episodes_finished": n_finished}
-            logger.log({**ep_metrics, **{f"{k}_ma": v for k, v in success_ma.items()}}, transitions, prefix="rollout/")
+            logger.log({**ep_metrics, **{f"{k}_ma": v for k, v in success_ma.items()}, **task_success_ma}, transitions, prefix="rollout/")
         print(
             f"it {it} transitions {transitions} ({perf['transitions_per_sec']:.1f}/s) episodes {episodes} "
             f"success_ma {success_ma.get('success/all', float('nan')):.3f} kl {train_metrics.get('approx_kl', 0):.4f}"

@@ -8,6 +8,12 @@ parallel envs (128-256), **sim-evals tasks only** (CubeBowl / CanMug / BananaBin
 so splat envs can't run in parallel. The SAC pieces (`DSRLSAC`, `ReplayBuffer`, `ChunkEnv`, `evaluate`) are still in the
 library and tested, but no script uses them now (see git history before this change for the SAC trainer).
 
+## Standard single-task settings
+Default flags for a single-task steering run (unless told otherwise): `--num-envs 128 --cam-scale 0.5 --critic-warmup-iters 5 --rollout-chunks 32 --residual-scale 0.0`
+(plain DSRL, no residual; the multitask recipe in `simevals_env.md` uses `--residual-scale 0.01`). Launch from a login node (slurm; the apptainer has no sbatch):
+`scripts/cluster/run_experiment.py NAME --time 12 -- --environment <env> --num-envs 128 --cam-scale 0.5 --critic-warmup-iters 5 --rollout-chunks 32 --residual-scale 0.0`
+(e.g. `NAME=cb-cupbowl1`, `--environment Molmo-cup-bowl`; see `cluster_runs.md`, `molmo_envs.md` for the Molmo env ids).
+
 ## Idea (unchanged)
 Frozen pi0.5 DROID (openpi server) makes an action chunk by denoising flow-matching noise `(15, 32)`. The actor
 `π(z | feat)` picks the noise for the first `steer_horizon` rows (default = `open_loop_horizon` = 8; the rest stay

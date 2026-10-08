@@ -159,20 +159,23 @@ class SimEvalsJointPosClient(DroidJointPosClient):
             "gripper_position": get("gripper_pos"),
         }
 
-    def build_requests(self, obs: dict, instruction: str, env_ids=None) -> tuple[list[dict], np.ndarray]:
-        """Batched `build_request` for envs `env_ids` (default: all): list of requests and (N, 224, 448, 3) model views."""
+    def build_requests(self, obs: dict, instruction: "str | list[str]", env_ids=None) -> tuple[list[dict], np.ndarray]:
+        """Batched `build_request` for envs `env_ids` (default: all): list of requests and (N, 224, 448, 3) model views.
+
+        `instruction` is one prompt for all envs, or one per env of the whole env batch (indexed by `env_ids`)."""
         if env_ids is None:
             env_ids = slice(None)
         o = self._extract_observation(obs, env_ids)
         ext = image_tools.resize_with_pad(o["right_image"], 224, 224)
         wrist = image_tools.resize_with_pad(o["wrist_image"], 224, 224)
+        prompts = [instruction] * len(ext) if isinstance(instruction, str) else list(np.asarray(instruction, dtype=object)[env_ids])
         requests = [
             {
                 "observation/exterior_image_1_left": ext[i],
                 "observation/wrist_image_left": wrist[i],
                 "observation/joint_position": o["joint_position"][i],
                 "observation/gripper_position": o["gripper_position"][i],
-                "prompt": instruction,
+                "prompt": prompts[i],
             }
             for i in range(len(ext))
         ]

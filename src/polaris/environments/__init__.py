@@ -4,12 +4,14 @@ from polaris.environments.manager_based_rl_splat_environment import (
 )
 from polaris.environments.droid_cfg import EnvCfg as DroidCfg
 from isaaclab.envs import ManagerBasedRLEnv
+from isaaclab.utils import configclass
+from polaris.rl.molmo_specs import MOLMO_SPECS
 
 # Import rubric system
 from polaris.environments.rubrics import Rubric
 from polaris.utils import DATA_PATH
 import polaris.environments.rubrics.checkers as checkers
-from polaris.environments.simeval_droid import CubeBowlEnvCfg, CanMugEnvCfg, BananaBinEnvCfg
+from polaris.environments.simeval_droid import CubeBowlEnvCfg, CubeBowlRandomEnvCfg, CanMugEnvCfg, BananaBinEnvCfg, MultiTaskEnvCfg, MultiTaskWalledEnvCfg, MolmoEnvCfg, CubeBowlWalledEnvCfg, CanMugWalledEnvCfg, BananaBinWalledEnvCfg
 
 
 # =============================================================================
@@ -17,11 +19,22 @@ from polaris.environments.simeval_droid import CubeBowlEnvCfg, CanMugEnvCfg, Ban
 # =============================================================================
 
 # sim-evals scenes (plain Isaac render, no splat); see docs/claude/simevals_env.md
-for _task, _cfg in {"CubeBowl": CubeBowlEnvCfg, "CanMug": CanMugEnvCfg, "BananaBin": BananaBinEnvCfg}.items():
+for _task, _cfg in {"CubeBowl": CubeBowlEnvCfg, "CubeBowlRandom": CubeBowlRandomEnvCfg, "CanMug": CanMugEnvCfg, "BananaBin": BananaBinEnvCfg, "MultiTask": MultiTaskEnvCfg,
+    "CubeBowlWalled": CubeBowlWalledEnvCfg, "CanMugWalled": CanMugWalledEnvCfg, "BananaBinWalled": BananaBinWalledEnvCfg,
+    "MultiTaskWalled": MultiTaskWalledEnvCfg}.items():
     gym.register(
         id=_task,
         entry_point=ManagerBasedRLEnv,
         kwargs={"env_cfg_entry_point": _cfg},
+        disable_env_checker=True,
+    )
+
+# generated MolmoSpaces pick-and-place envs (scripts/make_molmo_scenes.py; docs/claude/molmo_envs.md)
+for _id, _spec in MOLMO_SPECS.items():
+    gym.register(
+        id=_id,
+        entry_point=ManagerBasedRLEnv,
+        kwargs={"env_cfg_entry_point": configclass(type(f"Molmo_{_spec['scene']}", (MolmoEnvCfg,), {"scene_name": _spec["scene"]}))},
         disable_env_checker=True,
     )
 

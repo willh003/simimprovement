@@ -46,7 +46,7 @@ class VecChunkEnv:
     + `success_bonus` on success.
     """
 
-    def __init__(self, env, client, base: BatchChunkPolicy, encoder: ObsEncoder, cfg: SteeringConfig, instruction: str,
+    def __init__(self, env, client, base: BatchChunkPolicy, encoder: ObsEncoder, cfg: SteeringConfig, instruction: str | list[str],
                  gamma: float = 0.99, success_bonus: float = 0.0, task=None, priv_fn=None):
         if tuple(base.noise_shape) != tuple(cfg.noise_shape):
             raise ValueError(f"noise_shape mismatch: base {base.noise_shape} vs cfg {cfg.noise_shape}")
