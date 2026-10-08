@@ -6,7 +6,7 @@
 
 Checks free weirdlab GPUs first (hyakalloc); submits nothing and exits 2 if they are not available. Comma-separated
 partition lists don't work on Klone (sbatch silently uses the first), so partitions are tried one at a time.
-Logs / state: runs/cluster/NAME/{pi.log,train.log,jobs.json,pi_server.addr}. See docs/claude/cluster_runs.md.
+Logs / state: runs/cluster/NAME/{pi.log,train.log,jobs.json,pi_server.addr}. See docs/claude/current/running.md.
 """
 from __future__ import annotations
 

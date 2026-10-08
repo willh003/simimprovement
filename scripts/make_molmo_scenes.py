@@ -6,7 +6,7 @@ cube/bowl, plus /World/obj_<obj> and /World/cont_<cont>: rigid-body Xforms (tran
 child Xform referencing the MolmoSpaces asset (rotated upright (or on its side with `lay_flat`), origin moved to the bottom-centre of its bbox, so the body z is
 its height above the table). Nested rigid-body / articulation / PhysicsScene prims of the asset are disabled; assets without
 collision shapes (or `"collision": "mesh"` in the manifest) get convex hull (object) / convex decomposition (container) colliders.
-See docs/claude/molmo_envs.md.
+See docs/claude/current/envs_molmo.md.
 """
 import argparse
 import json

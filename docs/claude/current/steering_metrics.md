@@ -102,3 +102,17 @@ The eval step is the transition count at which it ran, so it lines up with the t
 - **No signal in batch?** `reward_mean` = 0 and tiny `adv_std`; consider larger `rollout_chunks`.
 - **Critic problems?** Fluctuating `explained_var`, `v_loss` spikes. Try a larger batch or `value_clip`.
 - **Regression after a peak?** Compare `eval/fixed/success/all` across checkpoints (`ckpt_*`) and keep the best one.
+
+## Logging code layout
+Logging is decoupled from the training logic; only `wandb_logger.py` imports wandb.
+| File | Role |
+|---|---|
+| `rl/stats.py` | `EpisodeStats` (per-episode sums per reward term + success flags), `MeanAccumulator` (interval means of update metrics), `RollingMean` (moving success rates) |
+| `rl/evaluation.py` | `evaluate_vec` (and the older single-env `evaluate`): deterministic episodes -> mean metrics + recorded frames |
+| `rl/wandb_logger.py` | `WandbLogger.log / log_video / finish`; mp4s are also saved to `<run_dir>/videos/` |
+| `rl/chunk_env.py`, `rl/vec_chunk_env.py` | `(Vec)ChunkTransition.reward_terms` (`reward == sum`), `.steps`, `.frames` |
+
+To add a reward term, add it to the task's terms (`rl/tasks.py`); for a new success metric add a `success/<name>` entry in `EpisodeStats.summary`.
+Eval videos: the first `eval_videos` episodes render every step (15 fps), frame = 224x448 model view (exterior | wrist).
+Environment: wandb auth comes from `~/.netrc`; the container has no system ffmpeg (`WandbLogger` points mediapy at imageio-ffmpeg's binary).
+Tests: `tests/test_rl_logging.py` (fake env/client; no Isaac or server).

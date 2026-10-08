@@ -1,18 +1,18 @@
 # Steering training (DSRL-PPO on parallel sim-evals envs) — `scripts/train_steering.py`
 
-Logging details: [wandb_logging.md](wandb_logging.md) (written for the SAC version; the logger classes are unchanged).
-Parallel envs / tiled cameras: [parallel_envs_bench.md](parallel_envs_bench.md). Batched server: [openpi_batching.md](openpi_batching.md).
+Metrics and logging: [steering_metrics.md](steering_metrics.md). Envs: [envs_simevals.md](envs_simevals.md), [envs_molmo.md](envs_molmo.md). Launching: [running.md](running.md).
+Batched server: [openpi_server.md](openpi_server.md). Benchmarks behind the parallel-env design: [../experiments/env_scaling_bench.md](../experiments/env_scaling_bench.md).
 
 The trainer used to be single-env DSRL-**SAC** (also worked on splat/rubric envs). It is now on-policy **PPO** over N
-parallel envs (128-256), **sim-evals tasks only** (CubeBowl / CanMug / BananaBin). The splat renderer only handles env 0,
+parallel envs (128-256), **sim-evals-style tasks only** (CubeBowl / CanMug / BananaBin, multitask and Molmo variants). The splat renderer only handles env 0,
 so splat envs can't run in parallel. The SAC pieces (`DSRLSAC`, `ReplayBuffer`, `ChunkEnv`, `evaluate`) are still in the
 library and tested, but no script uses them now (see git history before this change for the SAC trainer).
 
 ## Standard single-task settings
 Default flags for a single-task steering run (unless told otherwise): `--num-envs 128 --cam-scale 0.5 --critic-warmup-iters 5 --rollout-chunks 32 --residual-scale 0.0`
-(plain DSRL, no residual; the multitask recipe in `simevals_env.md` uses `--residual-scale 0.01`). Launch from a login node (slurm; the apptainer has no sbatch):
+(plain DSRL, no residual; multitask runs have used `--residual-scale 0.01`). Launch from a login node:
 `scripts/cluster/run_experiment.py NAME --time 12 -- --environment <env> --num-envs 128 --cam-scale 0.5 --critic-warmup-iters 5 --rollout-chunks 32 --residual-scale 0.0`
-(e.g. `NAME=cb-cupbowl1`, `--environment Molmo-cup-bowl`; see `cluster_runs.md`, `molmo_envs.md` for the Molmo env ids).
+(Molmo env ids: `envs_molmo.md`; launcher details: `running.md`.)
 
 ## Idea (unchanged)
 Frozen pi0.5 DROID (openpi server) makes an action chunk by denoising flow-matching noise `(15, 32)`. The actor
@@ -117,7 +117,7 @@ Unchanged: `Steered` client with `policy.steering_ckpt=<run>/ckpt_X` (+ `determi
 `tests/test_vec_chunk_env.py` (fake auto-resetting N-env: masking, hold action, gamma^k, refresh, unbatch, evaluate_vec).
 Run: `isaacpy -m pytest tests/`.
 
-## Residual steering + finetuned ResNet50 encoder
+## Residual steering + finetuned image encoder
 
 **Action space (verified):** the pi0.5 `pi05_droid_jointpos_polaris` chunk is ABSOLUTE joint positions (openpi's `AbsoluteActions`
 adds the current state back), and the sim `JointPositionActionCfg(use_default_offset=False, scale=1)` treats it as an absolute

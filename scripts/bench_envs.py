@@ -6,7 +6,6 @@ Prints one `BENCH {json}` line. Run with the openpi server up to measure under r
 Memory = device-wide used delta (driver level, includes Omniverse/PhysX allocations torch cannot see).
 """
 
-import argparse
 import json
 import os
 import time
@@ -15,7 +14,7 @@ from dataclasses import asdict, dataclass
 import gymnasium as gym
 import torch
 import tyro
-from isaaclab.app import AppLauncher
+from polaris.launch import launch_isaac
 
 
 @dataclass
@@ -36,10 +35,7 @@ def used_mib() -> float:
 
 
 def main(args: BenchArgs):
-    args_cli, _ = argparse.ArgumentParser().parse_known_args()
-    args_cli.enable_cameras = True
-    args_cli.headless = args.headless
-    simulation_app = AppLauncher(args_cli).app
+    simulation_app = launch_isaac(args.headless)
 
     from isaaclab_tasks.utils import parse_env_cfg
     import polaris.environments  # noqa: F401  (registers envs)

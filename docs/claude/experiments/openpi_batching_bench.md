@@ -1,21 +1,13 @@
 # Batched inference on the openpi server
 
-`Policy.infer` handles one obs (it adds a batch dim of 1, transforms are per-sample, output is cut to `x[0]`), so a
-pre-batched obs fails inside the transforms. Added a batched path (all in `third_party/openpi`):
-
-- `Policy.infer_batch(obs_list)` (`src/openpi/policies/policy.py`): input transforms per sample -> stack -> ONE
-  `sample_actions` call -> output transform per sample. Optional per-obs `"noise"` `(horizon, dim)`, all or none.
-- Server (`serving/websocket_policy_server.py`): message `{"batch": [obs, ...]}` -> reply `{"batch": [result, ...]}`.
-  Plain single-obs messages are unchanged.
-- Client: `WebsocketClientPolicy.infer_batch(obs_list) -> list[dict]`.
-- Test/benchmark: `scripts/test_pi_batch.py`.
+The batched API (`Policy.infer_batch`, `{"batch": [...]}` messages, `max_batch_size` splitting) is documented in `../current/openpi_server.md`; this page is the benchmark.
 
 ## Batch-size sweep (up to the memory limit)
 `scripts/bench_pi_batch.py` (dummy inputs: 2 x 224x224x3 uint8 images + proprio; median of 3 calls after a warm-up call
 that includes the per-size JIT compile), plotted by `scripts/plot_pi_batch.py`; raw numbers in
-`images/pi_batch_bench.json`. Model: pi05_droid_jointpos_polaris on an L40 (46 GB).
+`../images/pi_batch_bench.json`. Model: pi05_droid_jointpos_polaris on an L40 (46 GB).
 
-![throughput and latency vs batch size](images/pi_batch_throughput.png)
+![throughput and latency vs batch size](../images/pi_batch_throughput.png)
 
 | N (obs/call) | local: call ms | local obs/s | remote: call ms | remote obs/s | remote model ms |
 |---|---|---|---|---|---|
@@ -48,12 +40,5 @@ that includes the per-size JIT compile), plotted by `scripts/plot_pi_batch.py`; 
 - **Implication for 512 envs:** one policy query for all envs costs ~29 s, so with `open_loop_horizon=8` the policy
   inference alone bounds the rollout at ~17 obs/s regardless of how fast the sim is. To go faster you need a faster
   model call (more GPUs/servers, fewer denoising steps, lower precision), not larger batches.
-- `scripts/run_pi_parallel.py` now makes one `infer_batch` call per chunk step over a single connection (no thread pool).
 
-## Gotchas
-- JAX recompiles per batch size; keep N fixed (or pad to a few sizes). The first request compiles for minutes and blocks
-  the server event loop, so clients must disable websocket keepalive (`ping_interval=None`) or they get a 1011 timeout (the vendored `WebsocketClientPolicy` now does this, but only when the installed `websockets` has those args, i.e. >= 13; Isaac Sim bundles 12.0, whose sync client sends no keepalive pings, so there is nothing to disable and passing them raised a `TypeError`).
-- Running the server on a non-slurm node: `/gscratch` is read-only and `/root` has a ~5 GB quota (checkpoint is 12 GB;
-  the download fails with "Disk quota exceeded" and leaves truncated files that later load as OUT_OF_RANGE). Use
-  `OPENPI_DATA_HOME` on `/tmp`, `UV_CACHE_DIR=/root/.uv-cache`, and delete a partial `openpi-assets` dir before retrying.
-- `pkill -f serve_policy` kills the calling shell if its command line contains that string; use `pkill -f "[s]erve_polic[y]"`.
+Gotchas (JAX recompiles per batch size, keepalive, quota, `pkill`) are in `../current/openpi_server.md` and `../current/running.md`.

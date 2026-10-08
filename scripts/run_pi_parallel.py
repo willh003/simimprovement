@@ -1,15 +1,14 @@
 """Roll out a DROID policy on many parallel sim-evals envs at once and report the success rate across all of them.
 
 Parallel version of scripts/run_pi.py. Cameras are converted to `TiledCameraCfg` (one batched render product per camera
-instead of one per env), which lifts the ~48-camera cap of `CameraCfg` (see docs/claude/parallel_envs_bench.md).
+instead of one per env), which lifts the ~48-camera cap of `CameraCfg` (see docs/claude/experiments/env_scaling_bench.md).
 Needs an openpi server on --policy.host/--policy.port unless --dummy-policy is set. All envs are queried in one batched
-`infer_batch` call every `open_loop_horizon` steps (needs the batched openpi server, docs/claude/openpi_batching.md).
+`infer_batch` call every `open_loop_horizon` steps (needs the batched openpi server, docs/claude/current/openpi_server.md).
 
   isaacpy scripts/run_pi_parallel.py --num-envs 32 --environment BananaBin --policy.port 8000
   isaacpy scripts/run_pi_parallel.py --num-envs 8 --dummy-policy     # no server: holds pose, gripper open
 """
 
-import argparse
 import json
 import os
 import sys
@@ -38,12 +37,9 @@ def main(
     max_batch_size: int = 128,  # obs per server message; larger env counts are split (a huge batch can OOM the server)
     run_folder: str | None = None,  # default: runs/simevals_parallel/<date>/<time>
 ):
-    from isaaclab.app import AppLauncher
+    from polaris.launch import launch_isaac
 
-    args_cli, _ = argparse.ArgumentParser().parse_known_args()
-    args_cli.enable_cameras = True
-    args_cli.headless = headless
-    AppLauncher(args_cli)
+    launch_isaac(headless)
 
     from polaris.environments.simeval_parallel import make_parallel_env
 

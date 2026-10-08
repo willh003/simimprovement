@@ -39,7 +39,7 @@ SCENE_TASKS = {
     # the "bin" is the rigid body small_KLT_visual_collision; its origin sits above the floor, so z_min < 0
     "3": dict(object=("banana",), container=("klt",), thresholds=dict(xy_threshold=0.08, z_min=-0.08), success_z_max=0.1),  # put banana in the bin
 }
-for _spec in MOLMO_SPECS.values():  # generated MolmoSpaces scenes, keyed by scene name (docs/claude/molmo_envs.md)
+for _spec in MOLMO_SPECS.values():  # generated MolmoSpaces scenes, keyed by scene name (docs/claude/current/envs_molmo.md)
     SCENE_TASKS[_spec["scene"]] = dict(object=tuple(_spec["object"]), container=tuple(_spec["container"]),
                                        thresholds=_spec["thresholds"], success_z_max=_spec["success_z_max"])
 
@@ -57,24 +57,29 @@ MULTITASK_SPECS = {
 MULTI_EXTRA_PRIMS = {"2": ["_25_mug", "_10_potted_meat_can"], "3": ["_11_banana", "small_KLT_visual_collision"]}
 
 
-def ensure_multitask_scene() -> Path:
-    """Build assets/simevals/scene_multi.usd if missing: scene 1 (table, light, cube, bowl) plus the mug and can of scene 2
-    and the banana and bin of scene 3, copied prim-spec by prim-spec so their physics / collision overrides are kept.
-    Written next to the sources because the specs hold relative asset paths."""
-    path = DATA_PATH / f"scene{MULTI_SCENE}.usd"
+def _build_scene_file(scene_name: str, base: Path, copies) -> Path:
+    """Build `scene<scene_name>.usd` in DATA_PATH if missing: a copy of `base` plus the prim specs `copies` = [(source usd, prim name)],
+    copied prim-spec by prim-spec (`Sdf.CopySpec`) so physics / collision overrides are kept. Written next to the sources because the
+    specs hold relative asset paths; built under a temp name and renamed, so concurrent runs never see a partial file."""
+    path = DATA_PATH / f"scene{scene_name}.usd"
     if path.exists():
         return path
-    tmp = DATA_PATH / f"scene{MULTI_SCENE}.{os.getpid()}.tmp.usd"
+    tmp = DATA_PATH / f"scene{scene_name}.{os.getpid()}.tmp.usd"
     layer = Sdf.Layer.CreateNew(str(tmp))
-    layer.TransferContent(Sdf.Layer.FindOrOpen(str(DATA_PATH / "scene1.usd")))
-    for scene, names in MULTI_EXTRA_PRIMS.items():
-        src = Sdf.Layer.FindOrOpen(str(DATA_PATH / f"scene{scene}.usd"))
-        for name in names:
-            if not Sdf.CopySpec(src, f"/World/{name}", layer, f"/World/{name}"):
-                raise RuntimeError(f"could not copy /World/{name} from scene{scene}.usd")
+    layer.TransferContent(Sdf.Layer.FindOrOpen(str(base)))
+    for src_usd, name in copies:
+        if not Sdf.CopySpec(Sdf.Layer.FindOrOpen(str(src_usd)), f"/World/{name}", layer, f"/World/{name}"):
+            raise RuntimeError(f"could not copy /World/{name} from {Path(src_usd).name}")
     layer.Save()
-    os.replace(tmp, path)  # atomic: concurrent runs never see a partial file
+    os.replace(tmp, path)
     return path
+
+
+def ensure_multitask_scene() -> Path:
+    """Build assets/simevals/scene_multi.usd if missing: scene 1 (table, light, cube, bowl) plus the mug and can of scene 2
+    and the banana and bin of scene 3."""
+    copies = [(DATA_PATH / f"scene{scene}.usd", name) for scene, names in MULTI_EXTRA_PRIMS.items() for name in names]
+    return _build_scene_file(MULTI_SCENE, DATA_PATH / "scene1.usd", copies)
 
 
 MULTI_MOLMO_SCENE = "_multi_molmo"  # dynamic_scene name of the sim-evals + objaverse Molmo combined scene (assets/simevals/scene_multi_molmo.usd)
@@ -83,27 +88,33 @@ MULTI_MOLMO_SCENE = "_multi_molmo"  # dynamic_scene name of the sim-evals + obja
 def ensure_multitask_molmo_scene() -> Path:
     """Build assets/simevals/scene_multi_molmo.usd if missing: `scene_multi.usd` (table, light, the 3 sim-evals tasks' 6 objects) plus
     the object / container rigid bodies (`/World/obj_*`, `/World/cont_*`) of every objaverse Molmo env in MULTITASK_OBJAVERSE_TASKS, copied
-    from their `molmo_*.usd` scenes (containers shared by several envs, e.g. cont_pot2, are copied once; asset references are relative to
-    the assets dir, so the file lives next to them)."""
+    from their `molmo_*.usd` scenes (containers shared by several envs, e.g. cont_pot2, are copied once)."""
     path = DATA_PATH / f"scene{MULTI_MOLMO_SCENE}.usd"
     if path.exists():
         return path
-    tmp = DATA_PATH / f"scene{MULTI_MOLMO_SCENE}.{os.getpid()}.tmp.usd"
-    layer = Sdf.Layer.CreateNew(str(tmp))
-    layer.TransferContent(Sdf.Layer.FindOrOpen(str(ensure_multitask_scene())))
-    done = set()
+    copies = {}  # prim name -> source usd (dict: shared bodies are copied once)
     for env_id in MULTITASK_OBJAVERSE_TASKS:
         spec = MOLMO_SPECS[env_id]
-        src = Sdf.Layer.FindOrOpen(str(DATA_PATH / f"{spec['scene']}.usd"))
         for name in spec["object"] + spec["container"]:
-            if name in done:
-                continue
-            if not Sdf.CopySpec(src, f"/World/{name}", layer, f"/World/{name}"):
-                raise RuntimeError(f"could not copy /World/{name} from {spec['scene']}.usd")
-            done.add(name)
-    layer.Save()
-    os.replace(tmp, path)
-    return path
+            copies.setdefault(name, DATA_PATH / f"{spec['scene']}.usd")
+    return _build_scene_file(MULTI_MOLMO_SCENE, ensure_multitask_scene(), [(usd, name) for name, usd in copies.items()])
+
+
+def _camera(prim_path: str, focal_length: float, pos, rot) -> CameraCfg:
+    """720p pinhole RGB camera (DROID intrinsics); `rot` is an opengl-convention quaternion (w, x, y, z)."""
+    return CameraCfg(
+        prim_path=prim_path,
+        height=720,
+        width=1280,
+        data_types=["rgb"],
+        spawn=sim_utils.PinholeCameraCfg(
+            focal_length=focal_length,
+            focus_distance=28.0,
+            horizontal_aperture=5.376,
+            vertical_aperture=3.024,
+        ),
+        offset=CameraCfg.OffsetCfg(pos=pos, rot=rot, convention="opengl"),
+    )
 
 
 @configclass
@@ -118,53 +129,11 @@ class SceneCfg(InteractiveSceneCfg):
 
     robot = NVIDIA_DROID
 
-    external_cam = CameraCfg(
-        prim_path="{ENV_REGEX_NS}/external_cam",
-        height=720,
-        width=1280,
-        data_types=["rgb"],
-        spawn=sim_utils.PinholeCameraCfg(
-            focal_length=2.1,
-            focus_distance=28.0,
-            horizontal_aperture=5.376,
-            vertical_aperture=3.024,
-        ),
-        offset=CameraCfg.OffsetCfg(
-            pos=(0.05, 0.57, 0.66), rot=(-0.393, -0.195, 0.399, 0.805), convention="opengl"
-        ),
-    )
+    external_cam = _camera("{ENV_REGEX_NS}/external_cam", 2.1, pos=(0.05, 0.57, 0.66), rot=(-0.393, -0.195, 0.399, 0.805))
 
-    external_cam_2 = CameraCfg(
-        prim_path="{ENV_REGEX_NS}/external_cam_2",
-        height=720,
-        width=1280,
-        data_types=["rgb"],
-        spawn=sim_utils.PinholeCameraCfg(
-            focal_length=2.1,
-            focus_distance=28.0,
-            horizontal_aperture=5.376,
-            vertical_aperture=3.024,
-        ),
-        offset=CameraCfg.OffsetCfg(
-            pos=(0.05, -0.57, 0.66), rot=(0.805, 0.399, -0.195, -0.393), convention="opengl"
-        ),
-    )
+    external_cam_2 = _camera("{ENV_REGEX_NS}/external_cam_2", 2.1, pos=(0.05, -0.57, 0.66), rot=(0.805, 0.399, -0.195, -0.393))
 
-    wrist_cam = CameraCfg(
-        prim_path="{ENV_REGEX_NS}/robot/Gripper/Robotiq_2F_85/base_link/wrist_cam",
-        height=720,
-        width=1280,
-        data_types=["rgb"],
-        spawn=sim_utils.PinholeCameraCfg(
-            focal_length=2.8,
-            focus_distance=28.0,
-            horizontal_aperture=5.376,
-            vertical_aperture=3.024,
-        ),
-        offset=CameraCfg.OffsetCfg(
-            pos=(0.011, -0.031, -0.074), rot=(-0.420, 0.570, 0.576, -0.409), convention="opengl"
-        ),
-    )
+    wrist_cam = _camera("{ENV_REGEX_NS}/robot/Gripper/Robotiq_2F_85/base_link/wrist_cam", 2.8, pos=(0.011, -0.031, -0.074), rot=(-0.420, 0.570, 0.576, -0.409))
 
     def add_walls(self, x=(-0.8, 0.9), y=(-0.62, 0.62), z=(-0.5, 1.4), thickness=0.05, color=(0.12, 0.12, 0.12),
                   light_intensity=60000.0, emissive=(0.0, 0.0, 0.0), left_wall=True):
@@ -172,7 +141,7 @@ class SceneCfg(InteractiveSceneCfg):
         camera cannot see the neighbouring envs. Bounds are env-local metres (robot base at the origin, table x 0.2-0.9,
         y -0.48-0.52, external cams at y=+-0.57); the walls' inner faces lie on the bounds. The front wall touches the
         table's front edge, the side walls sit just behind the external cams (~0.1 m from the table), the back wall is behind the robot. `left_wall=False` drops the +y wall
-        (right behind external_cam; fuzzy in that cam, but the v2 setup with it performed best, see docs/claude/walled_envs.md)."""
+        (right behind external_cam; fuzzy in that cam, but the v2 setup with it performed best, see docs/claude/experiments/walled_envs.md)."""
         (x0, x1), (y0, y1), (z0, z1) = x, y, z
         cx, cy, cz, lx, ly, lz = (x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2, x1 - x0, y1 - y0, z1 - z0
         t = thickness
@@ -324,6 +293,10 @@ def gripper_pos(
     return joint_pos
 
 
+def _image_obs(sensor: str) -> ObsTerm:
+    return ObsTerm(func=mdp.observations.image, params={"sensor_cfg": SceneEntityCfg(sensor), "data_type": "rgb", "normalize": False})
+
+
 @configclass
 class ObservationCfg:
     @configclass
@@ -334,30 +307,9 @@ class ObservationCfg:
         gripper_pos = ObsTerm(
             func=gripper_pos, noise=noise.GaussianNoiseCfg(std=0.05), clip=(0, 1)
         )
-        external_cam = ObsTerm(
-                func=mdp.observations.image,
-                params={
-                    "sensor_cfg": SceneEntityCfg("external_cam"),
-                    "data_type": "rgb",
-                    "normalize": False,
-                    }
-                )
-        external_cam_2 = ObsTerm(
-                func=mdp.observations.image,
-                params={
-                    "sensor_cfg": SceneEntityCfg("external_cam_2"),
-                    "data_type": "rgb",
-                    "normalize": False,
-                    }
-                )
-        wrist_cam = ObsTerm(
-                func=mdp.observations.image,
-                params={
-                    "sensor_cfg": SceneEntityCfg("wrist_cam"),
-                    "data_type": "rgb",
-                    "normalize": False,
-                    }
-                )
+        external_cam = _image_obs("external_cam")
+        external_cam_2 = _image_obs("external_cam_2")
+        wrist_cam = _image_obs("wrist_cam")
 
         def __post_init__(self) -> None:
             self.enable_corruption = False
@@ -410,13 +362,7 @@ def randomize_pair_xy(
     obj_state[:, :2] += d_obj
     cont_state[:, :2] += d_cont
     yaw = uni(yaw_range, (n,))
-    dq = torch.stack([torch.cos(yaw / 2), torch.zeros_like(yaw), torch.zeros_like(yaw), torch.sin(yaw / 2)], dim=-1)
-    q = obj_state[:, 3:7]  # (w, x, y, z); apply the yaw about world z
-    w1, x1, y1, z1 = dq.unbind(-1)
-    w2, x2, y2, z2 = q.unbind(-1)
-    obj_state[:, 3:7] = torch.stack(
-        [w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2, w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
-         w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2, w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2], dim=-1)
+    obj_state[:, 3:7] = _yaw_times(yaw, obj_state[:, 3:7])  # yaw about world z
     for asset, state in ((obj, obj_state), (cont, cont_state)):
         asset.write_root_pose_to_sim(torch.cat([state[:, :3] + origins, state[:, 3:7]], dim=-1), env_ids=env_ids)
         asset.write_root_velocity_to_sim(torch.zeros_like(state[:, 7:13]), env_ids=env_ids)

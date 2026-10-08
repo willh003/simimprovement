@@ -1,11 +1,12 @@
 # Remote openpi server probe + camera-resolution sweep
 
-Companion to [parallel_envs_bench.md](parallel_envs_bench.md) (env-only throughput). Scripts: `scripts/bench_server.py`
+Companion to [env_scaling_bench.md](env_scaling_bench.md) (env-only throughput). Scripts: `scripts/bench_server.py`
 (dummy inputs, no env) and `scripts/run_pi_parallel.py` (many tiled-camera envs, one websocket per env).
 Setup: Isaac envs on node g3097 (L40), openpi server on another node (g3115:8000, slurm job 40962176; metadata is empty so the
 exact policy config is unknown to the client — user described it as pi0).
 
-## 1. Server (`isaacpy scripts/bench_server.py --host g3115`)
+## 1. Server, before batching existed (`isaacpy scripts/bench_server.py --host g3115`)
+_Superseded by `openpi_batching_bench.md`: the server now supports `infer_batch` (~17-20 obs/s with batches). The numbers below are the unbatched baseline._
 - **Inference ~88 ms/query** (server-reported `infer_ms`); round trip 91 ms for the usual 224x224 inputs, so the network hop
   adds only ~3 ms. Output `actions` shape (15, 8). Passing `noise` (15,32) costs nothing extra.
 - **No batching:** a request with a leading batch dim (B=2, 4) is rejected (`Error in inference server`, raised in
@@ -40,10 +41,5 @@ episode (success + hover-shaping terms; compare across columns within a task, no
 - Per-run wall time: ~10 min for 64 envs at <=640x360 (server bound, one server); ~14 min for 32x2 at max res.
 - Raw outputs: `runs/res_sweep/<Task>_s<scale>/{summary.json,all_cams.png,*.mp4}` (scale 0.25/0.5/1.0).
 
-## Gotchas
-- Isaac hangs on renderer errors and OOM: run sweeps detached (`setsid ... < /dev/null`), poll for `summary.json`, kill by PID.
-- `NGX isn't enabled` log lines are harmless; match on `Traceback` / `out of memory` / `Failed to allocate` instead of `Error`.
-- Test whether a host is reachable from the compute node you are on; a server on node A is not on `localhost` of node B.
-
-![resolution sweep](images/resolution_sweep.png)
+![resolution sweep](../images/resolution_sweep.png)
 (regenerate: `isaacpy scripts/plot_bench_results.py`)

@@ -1,14 +1,13 @@
 """Train a DSRL-style noise-steering policy for the frozen pi0.5 DROID policy (served by openpi) with PPO on many
 parallel sim-evals envs (CubeBowl / CanMug / BananaBin).
 
-All envs query the openpi server in one batched `infer_batch` call per chunk (docs/claude/openpi_batching.md) and run
-the chunk in lockstep; cameras are tiled (docs/claude/parallel_envs_bench.md). See docs/claude/steering_training.md.
+All envs query the openpi server in one batched `infer_batch` call per chunk (docs/claude/current/openpi_server.md) and run
+the chunk in lockstep; cameras are tiled (docs/claude/experiments/env_scaling_bench.md). See docs/claude/current/steering_training.md.
 
   isaacpy scripts/train_steering.py --environment CubeBowl --num-envs 128 --policy.port 8000
   isaacpy scripts/train_steering.py --environment CubeBowl --num-envs 8 --dummy-policy --wandb-mode disabled  # no server
 """
 
-import argparse
 import os
 import sys
 import time
@@ -30,7 +29,7 @@ class TrainArgs:
     environment: str  # sim-evals task: CubeBowl | CanMug | BananaBin | MultiTask (all three at once, envs split evenly)
     policy: PolicyArgs
     num_envs: int = 128
-    cam_scale: float = 0.5  # camera resolution multiplier (0.5 = 640x360; 0.25 hurts the base policy, see server_and_resolution_bench.md)
+    cam_scale: float = 0.5  # camera resolution multiplier (0.5 = 640x360; 0.25 hurts the base policy, see docs/claude/experiments/openpi_server_and_resolution.md)
     server_batch_size: int | None = None  # requests per infer_batch call (None: all envs at once); keep fixed, JAX recompiles per size
     headless: bool = True
     instruction: str | None = None
@@ -91,13 +90,9 @@ def find_nonfinite(**arrays) -> dict[str, np.ndarray]:
 
 
 def main(args: TrainArgs):
-    parser = argparse.ArgumentParser()
-    args_cli, _ = parser.parse_known_args()
-    args_cli.enable_cameras = True
-    args_cli.headless = args.headless
-    from isaaclab.app import AppLauncher
+    from polaris.launch import launch_isaac
 
-    AppLauncher(args_cli)
+    launch_isaac(args.headless)
 
     from polaris.environments.simeval_parallel import make_parallel_env
     from polaris.latent_rl.algos import DSRLPPO

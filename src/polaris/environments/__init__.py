@@ -18,7 +18,7 @@ from polaris.environments.simeval_droid import CubeBowlEnvCfg, CubeBowlRandomEnv
 # Environment Registration
 # =============================================================================
 
-# sim-evals scenes (plain Isaac render, no splat); see docs/claude/simevals_env.md
+# sim-evals scenes (plain Isaac render, no splat); see docs/claude/current/envs_simevals.md
 for _task, _cfg in {"CubeBowl": CubeBowlEnvCfg, "CubeBowlRandom": CubeBowlRandomEnvCfg, "CanMug": CanMugEnvCfg, "BananaBin": BananaBinEnvCfg, "MultiTask": MultiTaskEnvCfg,
     "CubeBowlWalled": CubeBowlWalledEnvCfg, "CanMugWalled": CanMugWalledEnvCfg, "BananaBinWalled": BananaBinWalledEnvCfg,
     "MultiTaskWalled": MultiTaskWalledEnvCfg, "MultiTaskObjaverse": MultiTaskObjaverseEnvCfg, "MultiTaskObjaverseWalled": MultiTaskObjaverseWalledEnvCfg}.items():
@@ -29,7 +29,7 @@ for _task, _cfg in {"CubeBowl": CubeBowlEnvCfg, "CubeBowlRandom": CubeBowlRandom
         disable_env_checker=True,
     )
 
-# generated MolmoSpaces pick-and-place envs (scripts/make_molmo_scenes.py; docs/claude/molmo_envs.md)
+# generated MolmoSpaces pick-and-place envs (scripts/make_molmo_scenes.py; docs/claude/current/envs_molmo.md)
 for _id, _spec in MOLMO_SPECS.items():
     gym.register(
         id=_id,

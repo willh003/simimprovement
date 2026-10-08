@@ -16,7 +16,7 @@ def to_tiled(cam_cfg, scale: float) -> TiledCameraCfg:
     """Convert a `CameraCfg` into a `TiledCameraCfg` (same prim path/spawn/offset), resolution multiplied by `scale`.
 
     Tiled cameras render all envs of a camera into one batched render product, which lifts the ~48-camera cap of
-    `CameraCfg` (docs/claude/parallel_envs_bench.md).
+    `CameraCfg` (docs/claude/experiments/env_scaling_bench.md).
     """
     return TiledCameraCfg(
         prim_path=cam_cfg.prim_path,

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Start (or stop) an openpi policy server on the node of a running slurm job.
-# See OPENPI_SERVER.md for background and pitfalls.
+# See docs/claude/current/openpi_server.md for background and pitfalls.
 #
 # Usage: start_pi_server.sh [JOBID] [--mem FRACTION] [--stop]
 #   With no JOBID, the server runs on the current node.

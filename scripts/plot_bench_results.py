@@ -1,4 +1,4 @@
-"""Plot the benchmark results recorded in docs/claude/{parallel_envs_bench,server_and_resolution_bench}.md.
+"""Plot the benchmark results recorded in docs/claude/experiments/{env_scaling_bench,openpi_server_and_resolution}.md.
 
     isaacpy scripts/plot_bench_results.py   # writes docs/claude/images/{resolution_sweep,env_scaling}.png
 """

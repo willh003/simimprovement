@@ -5,12 +5,11 @@ import mediapy
 import tqdm
 import gymnasium as gym
 import torch
-import argparse
 import pandas as pd
 
 
 from pathlib import Path
-from isaaclab.app import AppLauncher
+from polaris.launch import launch_isaac
 
 from polaris.config import EvalArgs
 
@@ -19,12 +18,7 @@ def main(eval_args: EvalArgs):
     # This must be done before importing anything from IsaacLab
     # Inside main function to avoid launching IsaacLab in global scope
     # >>>> Isaac Sim App Launcher <<<<
-    parser = argparse.ArgumentParser()
-    args_cli, _ = parser.parse_known_args()
-    args_cli.enable_cameras = True
-    args_cli.headless = eval_args.headless
-    app_launcher = AppLauncher(args_cli)
-    simulation_app = app_launcher.app
+    simulation_app = launch_isaac(eval_args.headless)
     # >>>> Isaac Sim App Launcher <<<<
 
     from isaaclab_tasks.utils import parse_env_cfg  # noqa: E402

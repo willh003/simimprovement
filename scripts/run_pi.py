@@ -7,7 +7,6 @@ Needs an openpi server on --policy.host/--policy.port unless --dummy-policy is s
   python scripts/eval_simevals.py --episodes 1 --dummy-policy     # no server: holds pose, gripper open
 """
 
-import argparse
 from datetime import datetime
 from pathlib import Path
 
@@ -80,13 +79,9 @@ def main(
     dummy_policy: bool = False,
     run_folder: str | None = None,  # default: runs/simevals_eval/<date>/<time>
 ):
-    from isaaclab.app import AppLauncher
+    from polaris.launch import launch_isaac
 
-    parser = argparse.ArgumentParser()
-    args_cli, _ = parser.parse_known_args()
-    args_cli.enable_cameras = True
-    args_cli.headless = headless
-    simulation_app = AppLauncher(args_cli).app
+    simulation_app = launch_isaac(headless)
 
     import polaris.environments  # noqa: F401  (registers *)
     from isaaclab_tasks.utils import parse_env_cfg
