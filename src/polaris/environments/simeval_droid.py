@@ -24,7 +24,7 @@ from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.envs import ManagerBasedRLEnv, ManagerBasedRLEnvCfg
 from isaaclab.sensors import CameraCfg, ContactSensorCfg
 
-from polaris.rl.tasks import MULTITASK_OBJAVERSE_TASKS, MULTITASK_TASKS
+from polaris.rl.tasks import MULTITASK_ALL_TASKS, MULTITASK_OBJAVERSE_TASKS, MULTITASK_TASKS
 
 from polaris.rl.molmo_specs import MOLMO_SPECS
 
@@ -83,21 +83,23 @@ def ensure_multitask_scene() -> Path:
 
 
 MULTI_MOLMO_SCENE = "_multi_molmo"  # dynamic_scene name of the sim-evals + objaverse Molmo combined scene (assets/simevals/scene_multi_molmo.usd)
+MULTI_ALL_SCENE = "_multi_all"  # sim-evals + every Molmo env (thor and objaverse), assets/simevals/scene_multi_all.usd
+MULTI_MOLMO_SCENES = {MULTI_MOLMO_SCENE: MULTITASK_OBJAVERSE_TASKS, MULTI_ALL_SCENE: [t for t in MULTITASK_ALL_TASKS if t in MOLMO_SPECS]}
 
 
-def ensure_multitask_molmo_scene() -> Path:
-    """Build assets/simevals/scene_multi_molmo.usd if missing: `scene_multi.usd` (table, light, the 3 sim-evals tasks' 6 objects) plus
-    the object / container rigid bodies (`/World/obj_*`, `/World/cont_*`) of every objaverse Molmo env in MULTITASK_OBJAVERSE_TASKS, copied
+def ensure_multitask_molmo_scene(scene_name: str = MULTI_MOLMO_SCENE) -> Path:
+    """Build assets/simevals/scene<scene_name>.usd if missing: `scene_multi.usd` (table, light, the 3 sim-evals tasks' 6 objects) plus
+    the object / container rigid bodies (`/World/obj_*`, `/World/cont_*`) of the Molmo envs `MULTI_MOLMO_SCENES[scene_name]`, copied
     from their `molmo_*.usd` scenes (containers shared by several envs, e.g. cont_pot2, are copied once)."""
-    path = DATA_PATH / f"scene{MULTI_MOLMO_SCENE}.usd"
+    path = DATA_PATH / f"scene{scene_name}.usd"
     if path.exists():
         return path
     copies = {}  # prim name -> source usd (dict: shared bodies are copied once)
-    for env_id in MULTITASK_OBJAVERSE_TASKS:
+    for env_id in MULTI_MOLMO_SCENES[scene_name]:
         spec = MOLMO_SPECS[env_id]
         for name in spec["object"] + spec["container"]:
             copies.setdefault(name, DATA_PATH / f"{spec['scene']}.usd")
-    return _build_scene_file(MULTI_MOLMO_SCENE, ensure_multitask_scene(), [(usd, name) for name, usd in copies.items()])
+    return _build_scene_file(scene_name, ensure_multitask_scene(), [(usd, name) for name, usd in copies.items()])
 
 
 def _camera(prim_path: str, focal_length: float, pos, rot) -> CameraCfg:
@@ -169,8 +171,8 @@ class SceneCfg(InteractiveSceneCfg):
     def dynamic_scene(self, scene_name: str):
         if scene_name == MULTI_SCENE:
             ensure_multitask_scene()
-        elif scene_name == MULTI_MOLMO_SCENE:
-            ensure_multitask_molmo_scene()
+        elif scene_name in MULTI_MOLMO_SCENES:
+            ensure_multitask_molmo_scene(scene_name)
         environment_path = DATA_PATH / (f"{scene_name}.usd" if scene_name.startswith("molmo_") else f"scene{scene_name}.usd")
         scene = AssetBaseCfg(
                 prim_path="{ENV_REGEX_NS}/scene",
@@ -757,6 +759,21 @@ class MultiTaskObjaverseEnvCfg(MultiTaskEnvCfg):
 
 @configclass
 class MultiTaskObjaverseWalledEnvCfg(MultiTaskObjaverseEnvCfg):
+    def __post_init__(self):
+        super().__post_init__()
+        self.scene.add_walls()
+
+
+@configclass
+class MultiTaskAllEnvCfg(MultiTaskEnvCfg):
+    """MultiTask over everything: CubeBowl + CanMug + BananaBin + all Molmo envs (thor and objaverse, `MULTITASK_ALL_TASKS`)."""
+
+    multitask_scene: str = MULTI_ALL_SCENE
+    multitask_tasks: tuple = tuple(MULTITASK_ALL_TASKS)
+
+
+@configclass
+class MultiTaskAllWalledEnvCfg(MultiTaskAllEnvCfg):
     def __post_init__(self):
         super().__post_init__()
         self.scene.add_walls()

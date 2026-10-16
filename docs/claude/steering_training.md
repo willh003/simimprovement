@@ -1,0 +1,4 @@
+
+## Resume + NaN guard (added after run MultiTask-0810-0751-0d2b88)
+- `--resume <run>/ckpt_N`: loads `ppo.pt` (actor/critic/opt/encoder), starts at iteration N+1 (`--iterations` is the total), logging step offset = N*num_envs*rollout_chunks, new run folder / wandb run. Env state, buffer, RNG are not restored; config must match.
+- That run (residual 0.1, MultiTask) went NaN in the critic at it 60: every later iteration (61-83) had NaN values for all envs, so the update was skipped (`bad_rollout_*.pt`) and nothing learned for the last ~23 iterations before the 12 h limit. Fix: the update now snapshots the weights and, if actor/critic/encoder come out non-finite, restores the snapshot and skips (`train/nan_updates`). Cause of the NaN itself not diagnosed. Resumed as `mt-res0p1-r2` from ckpt_50 (24 h).

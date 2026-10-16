@@ -11,7 +11,7 @@ from polaris.rl.molmo_specs import MOLMO_SPECS
 from polaris.environments.rubrics import Rubric
 from polaris.utils import DATA_PATH
 import polaris.environments.rubrics.checkers as checkers
-from polaris.environments.simeval_droid import CubeBowlEnvCfg, CubeBowlRandomEnvCfg, CanMugEnvCfg, BananaBinEnvCfg, MultiTaskEnvCfg, MultiTaskWalledEnvCfg, MultiTaskObjaverseEnvCfg, MultiTaskObjaverseWalledEnvCfg, MolmoEnvCfg, CubeBowlWalledEnvCfg, CanMugWalledEnvCfg, BananaBinWalledEnvCfg
+from polaris.environments.simeval_droid import CubeBowlEnvCfg, CubeBowlRandomEnvCfg, CanMugEnvCfg, BananaBinEnvCfg, MultiTaskEnvCfg, MultiTaskWalledEnvCfg, MultiTaskObjaverseEnvCfg, MultiTaskObjaverseWalledEnvCfg, MultiTaskAllEnvCfg, MultiTaskAllWalledEnvCfg, MolmoEnvCfg, CubeBowlWalledEnvCfg, CanMugWalledEnvCfg, BananaBinWalledEnvCfg
 
 
 # =============================================================================
@@ -21,7 +21,8 @@ from polaris.environments.simeval_droid import CubeBowlEnvCfg, CubeBowlRandomEnv
 # sim-evals scenes (plain Isaac render, no splat); see docs/claude/current/envs_simevals.md
 for _task, _cfg in {"CubeBowl": CubeBowlEnvCfg, "CubeBowlRandom": CubeBowlRandomEnvCfg, "CanMug": CanMugEnvCfg, "BananaBin": BananaBinEnvCfg, "MultiTask": MultiTaskEnvCfg,
     "CubeBowlWalled": CubeBowlWalledEnvCfg, "CanMugWalled": CanMugWalledEnvCfg, "BananaBinWalled": BananaBinWalledEnvCfg,
-    "MultiTaskWalled": MultiTaskWalledEnvCfg, "MultiTaskObjaverse": MultiTaskObjaverseEnvCfg, "MultiTaskObjaverseWalled": MultiTaskObjaverseWalledEnvCfg}.items():
+    "MultiTaskWalled": MultiTaskWalledEnvCfg, "MultiTaskObjaverse": MultiTaskObjaverseEnvCfg, "MultiTaskObjaverseWalled": MultiTaskObjaverseWalledEnvCfg,
+    "MultiTaskAll": MultiTaskAllEnvCfg, "MultiTaskAllWalled": MultiTaskAllWalledEnvCfg}.items():
     gym.register(
         id=_task,
         entry_point=ManagerBasedRLEnv,

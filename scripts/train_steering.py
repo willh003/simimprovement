@@ -8,6 +8,7 @@ the chunk in lockstep; cameras are tiled (docs/claude/experiments/env_scaling_be
   isaacpy scripts/train_steering.py --environment CubeBowl --num-envs 8 --dummy-policy --wandb-mode disabled  # no server
 """
 
+import copy
 import os
 import sys
 import time
@@ -53,7 +54,9 @@ class TrainArgs:
     warmup_min_explained_var: float | None = None  # end warmup early once the critic's explained_var exceeds this
     rl_device: str = "cuda"  # PPO nets + rollout buffer (CPU updates are ~100x slower next to Isaac)
     rollout_chunks: int = 8  # chunks per env per PPO iteration (batch = num_envs * rollout_chunks transitions)
-    iterations: int = 300
+    iterations: int = 300  # total, so with --resume the run continues from the checkpoint's iteration up to this
+    resume: str | None = None  # checkpoint dir of an earlier run (<run>/ckpt_N): restores actor / critic / optimizer (/ encoder) and starts at iteration N
+    # (new run folder + wandb run; the rollout buffer, env state and RNG are not restored, the config must match the checkpoint's)
     save_every: int = 25  # iterations
     eval_every_min: float = 30.0  # wall-clock minutes of training between evals (checked after each PPO iteration, so it
     # overshoots by up to one iteration); eval = one deterministic episode in every env. Independent of num_envs/rollout_chunks
@@ -178,16 +181,22 @@ def main(args: TrainArgs):
         print(f"eval @ {step}: success {metrics['success/all']:.3f}, return {metrics['return']:.3f} ({metrics['time_s']:.0f}s)")
 
     transitions = env_steps = episodes = 0
+    start_it = 0
+    if args.resume:
+        ppo.load_state_dict(torch.load(Path(args.resume) / "ppo.pt", map_location=args.rl_device))
+        start_it = int(Path(args.resume).name.split("_")[-1])
+        transitions = start_it * args.num_envs * args.rollout_chunks  # logging step offset, so the curves continue
+        print(f"resumed from {args.resume}: starting at iteration {start_it + 1}")
     evaled_at_it = -1
     recent = RollingMean(window=args.num_envs)
     recent_task = {n: RollingMean(window=len(i)) for n, i in task_envs.items()} if multitask else {}
     warmup_iters = args.critic_warmup_iters  # counted by the iteration index (there is no resume path in this script)
     if args.eval_at_start:
-        run_eval(0)
+        run_eval(transitions)
     last_eval_end = time.perf_counter()
     feat = venv.reset()
     ep_stats = [EpisodeStats() for _ in range(args.num_envs)]
-    for it in range(1, args.iterations + 1):
+    for it in range(start_it + 1, args.iterations + 1):
         t0 = time.perf_counter()
         buf.reset()
         finished, n_finished, success_ma, task_success_ma = MeanAccumulator(), 0, {}, {}
@@ -243,7 +252,18 @@ def main(args: TrainArgs):
                 s_.reset()
             continue
         warming = it <= warmup_iters
+        snapshot = copy.deepcopy(ppo.state_dict())  # restored if the update leaves non-finite weights (run MultiTask-0810-0751-0d2b88 went NaN at it 60 and every later update was skipped)
         train_metrics = ppo.update(buf, train_policy=not warming, warmup_train_encoder=args.warmup_train_encoder)
+        if not all(torch.isfinite(p_).all() for m_ in (ppo.actor, ppo.critic, *([ppo.encoder] if ppo.encoder is not None else [])) for p_ in m_.parameters()):
+            ppo.load_state_dict(snapshot)
+            print(f"it {it}: update produced non-finite weights, reverted to the pre-update weights")
+            logger.log({"nan_updates": 1, "iteration": it}, transitions, prefix="train/")
+            del snapshot
+            feat = venv.reset()
+            for s_ in ep_stats:
+                s_.reset()
+            continue
+        del snapshot
         if warming and args.warmup_min_explained_var is not None and train_metrics["explained_var"] > args.warmup_min_explained_var:
             warmup_iters = it  # critic is good enough: policy updates start next iteration
         t_update = time.perf_counter() - t0 - t_rollout
